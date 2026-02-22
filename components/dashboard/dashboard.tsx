@@ -1,7 +1,7 @@
 'use client'
 
 import useSWR from 'swr'
-import type { SentimentPayload, ContangoData, FearGreedData } from '@/lib/types'
+import type { SentimentPayload, ContangoData, FearGreedData, CryptoFearGreedData } from '@/lib/types'
 import { HeaderClock } from './header-clock'
 import { MetricPanel } from './metric-panel'
 import { Sparkline } from './sparkline'
@@ -27,7 +27,7 @@ export function Dashboard() {
   )
 
   const errorCount = data
-    ? [data.vix, data.vvix, data.contango, data.fearGreed, data.aaii].filter(
+    ? [data.vix, data.vvix, data.contango, data.fearGreed, data.aaii, data.cryptoFearGreed].filter(
         (d) => d.error
       ).length
     : 0
@@ -65,6 +65,7 @@ export function Dashboard() {
 
   const contango = data?.contango as ContangoData | undefined
   const fearGreed = data?.fearGreed as FearGreedData | undefined
+  const cryptoFG = data?.cryptoFearGreed as CryptoFearGreedData | undefined
 
   return (
     <div className="min-h-screen bg-terminal-bg flex flex-col">
@@ -186,6 +187,59 @@ export function Dashboard() {
           sparklineColor="#4fc3f7"
           invertColor
         />
+
+        {/* Crypto Fear & Greed Panel */}
+        <div className="flex flex-col border border-terminal-border bg-terminal-panel p-3 gap-2 min-h-[160px]">
+          <div className="flex items-center justify-between">
+            <h3 className="text-terminal-orange text-xs font-bold uppercase tracking-wider">
+              Crypto Fear & Greed
+            </h3>
+            <div className="h-1.5 w-1.5 rounded-full bg-terminal-green animate-blink-dot" aria-hidden="true" />
+          </div>
+
+          {cryptoFG?.error ? (
+            <div className="flex-1 flex flex-col items-center justify-center gap-2 text-center">
+              <AlertTriangle className="h-5 w-5 text-terminal-red" />
+              <p className="text-terminal-red text-[10px] leading-tight">{cryptoFG.error}</p>
+            </div>
+          ) : (
+            <>
+              <div className="flex items-baseline gap-2">
+                <span className="text-2xl font-bold text-foreground tabular-nums animate-pulse-glow">
+                  {cryptoFG?.value != null ? Math.round(cryptoFG.value) : '--'}
+                </span>
+                <span className="text-[10px] text-terminal-dim">/100</span>
+                {cryptoFG?.change != null && (
+                  <span
+                    className={`text-xs font-bold tabular-nums ${
+                      cryptoFG.change > 0 ? 'text-terminal-green' : cryptoFG.change < 0 ? 'text-terminal-red' : 'text-foreground'
+                    }`}
+                  >
+                    {cryptoFG.change > 0 ? '\u25B2' : cryptoFG.change < 0 ? '\u25BC' : ''}{' '}
+                    {Math.abs(cryptoFG.change).toFixed(0)}
+                  </span>
+                )}
+              </div>
+
+              <FearGreedGauge
+                score={cryptoFG?.value ?? null}
+                classification={cryptoFG?.classification}
+              />
+
+              <p className="text-terminal-dim text-[10px]">
+                {'Source: CoinGlass / alternative.me'}
+              </p>
+
+              <div className="mt-auto">
+                <Sparkline
+                  data={cryptoFG?.history ?? []}
+                  color="#f7931a"
+                  height={36}
+                />
+              </div>
+            </>
+          )}
+        </div>
 
         {/* Placeholder for Phase 2 */}
         <PlaceholderPanel />

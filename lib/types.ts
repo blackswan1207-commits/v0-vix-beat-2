@@ -24,11 +24,16 @@ export interface FearGreedData extends IndicatorData {
   classification?: string
 }
 
+export interface CryptoFearGreedData extends IndicatorData {
+  classification?: string
+}
+
 export interface SentimentPayload {
   vix: IndicatorData
   vvix: IndicatorData
   contango: ContangoData
   fearGreed: FearGreedData
   aaii: IndicatorData
+  cryptoFearGreed: CryptoFearGreedData
   timestamp: string
 }

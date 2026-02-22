@@ -5,6 +5,7 @@ import type {
   IndicatorData,
   ContangoData,
   FearGreedData,
+  CryptoFearGreedData,
 } from '@/lib/types'
 
 const CACHE_KEY = 'sentiment-data'
@@ -313,6 +314,174 @@ function getClassification(score: number): string {
   return 'Extreme Greed'
 }
 
+// ── Crypto Fear & Greed Index (CoinGlass → alternative.me fallback) ──
+function getCryptoClassification(score: number): string {
+  if (score <= 10) return 'Extreme Fear'
+  if (score <= 25) return 'Extreme Fear'
+  if (score <= 45) return 'Fear'
+  if (score <= 55) return 'Neutral'
+  if (score <= 75) return 'Greed'
+  return 'Extreme Greed'
+}
+
+async function fetchCryptoFearGreedFromCoinGlass(): Promise<{ value: number; classification: string } | null> {
+  try {
+    // CoinGlass renders client-side, but we can try their public-facing page
+    // and look for embedded JSON data or meta tags
+    const res = await fetch('https://www.coinglass.com/zh-TW/pro/i/FearGreedIndex', {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+      },
+      signal: AbortSignal.timeout(10000),
+    })
+    if (!res.ok) return null
+    const html = await res.text()
+
+    // Try to find embedded data in script tags (Next.js __NEXT_DATA__ or similar)
+    const nextDataMatch = html.match(/__NEXT_DATA__\s*=\s*(\{[\s\S]*?\});?\s*<\/script>/)
+    if (nextDataMatch) {
+      try {
+        const nextData = JSON.parse(nextDataMatch[1])
+        // Navigate the data structure to find fear & greed value
+        const props = nextData?.props?.pageProps
+        if (props) {
+          const jsonStr = JSON.stringify(props)
+          // Look for fear greed value pattern
+          const fgMatch = jsonStr.match(/"(?:fearGreed|fear_greed|fng|index)"\s*:\s*(\d+)/)
+          if (fgMatch) {
+            const val = parseInt(fgMatch[1], 10)
+            if (val >= 0 && val <= 100) {
+              return { value: val, classification: getCryptoClassification(val) }
+            }
+          }
+        }
+      } catch {
+        // JSON parse failed
+      }
+    }
+
+    // Try to find any fear/greed value in the page source
+    // CoinGlass often includes data in JSON-LD or meta tags
+    const { load } = await import('cheerio')
+    const $ = load(html)
+
+    // Check meta tags
+    const ogDesc = $('meta[property="og:description"]').attr('content') || ''
+    const descMatch = ogDesc.match(/(\d+)/)
+    if (descMatch) {
+      const val = parseInt(descMatch[1], 10)
+      if (val >= 0 && val <= 100) {
+        return { value: val, classification: getCryptoClassification(val) }
+      }
+    }
+
+    // Check for script tags with embedded data
+    $('script').each((_, el) => {
+      const content = $(el).html() || ''
+      // Look for patterns like "value":8 or fearGreedIndex: 8
+      const patterns = [
+        /(?:fearGreed|fear_greed|fng|greedIndex)[^}]*?(?:"value"|value)\s*[=:]\s*(\d+)/i,
+        /(?:"value"|value)\s*[=:]\s*(\d+)[^}]*?(?:fearGreed|fear_greed|fng|greedIndex)/i,
+      ]
+      for (const pattern of patterns) {
+        const match = content.match(pattern)
+        if (match) {
+          const val = parseInt(match[1], 10)
+          if (val >= 0 && val <= 100) {
+            return { value: val, classification: getCryptoClassification(val) }
+          }
+        }
+      }
+    })
+
+    return null
+  } catch {
+    return null
+  }
+}
+
+async function fetchCryptoFearGreedFromAlternativeMe(): Promise<{ value: number; classification: string; previousValue: number | null } | null> {
+  try {
+    // alternative.me free public API - no key required
+    const res = await fetch('https://api.alternative.me/fng/?limit=2', {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'application/json',
+      },
+      signal: AbortSignal.timeout(10000),
+    })
+    if (!res.ok) return null
+    const json = await res.json()
+
+    if (json?.metadata?.error) return null
+    const entries = json?.data
+    if (!Array.isArray(entries) || entries.length === 0) return null
+
+    const latest = entries[0]
+    const value = parseInt(latest.value, 10)
+    if (isNaN(value)) return null
+
+    const classification = latest.value_classification || getCryptoClassification(value)
+    const previousValue = entries.length > 1 ? parseInt(entries[1].value, 10) : null
+
+    return { value, classification, previousValue: isNaN(previousValue as number) ? null : previousValue }
+  } catch {
+    return null
+  }
+}
+
+async function fetchCryptoFearGreed(): Promise<CryptoFearGreedData> {
+  const label = 'Crypto Fear & Greed'
+  try {
+    let value: number | null = null
+    let classification: string | undefined
+    let change: number | null = null
+
+    // === Primary: CoinGlass scraping ===
+    const coinglassResult = await fetchCryptoFearGreedFromCoinGlass()
+    if (coinglassResult) {
+      value = coinglassResult.value
+      classification = coinglassResult.classification
+    }
+
+    // === Fallback: alternative.me free API ===
+    if (value === null) {
+      const altResult = await fetchCryptoFearGreedFromAlternativeMe()
+      if (altResult) {
+        value = altResult.value
+        classification = altResult.classification
+        if (altResult.previousValue !== null) {
+          change = value - altResult.previousValue
+        }
+      }
+    }
+
+    if (value === null) {
+      throw new Error('CoinGlass + alternative.me 均無法取得加密貨幣恐慌指數')
+    }
+
+    const today = todayStr()
+    const history = appendHistory(label, { date: today, value })
+
+    return {
+      label,
+      value,
+      change,
+      classification,
+      history,
+      lastUpdated: new Date().toISOString(),
+    }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Unknown error'
+    return {
+      ...makeError(label, `Error: 無法取得真實連線，需更換資料源 - ${msg}`),
+      classification: undefined,
+    }
+  }
+}
+
 // ── AAII Investor Sentiment (Bull-Bear Spread) ──
 async function fetchAAII(): Promise<IndicatorData> {
   const label = 'AAII Bull-Bear'
@@ -411,12 +580,13 @@ export async function GET() {
   }
 
   // Fetch all indicators in parallel
-  const [vix, vvix, contango, fearGreed, aaii] = await Promise.all([
+  const [vix, vvix, contango, fearGreed, aaii, cryptoFearGreed] = await Promise.all([
     fetchVIX(),
     fetchVVIX(),
     fetchContango(),
     fetchFearGreed(),
     fetchAAII(),
+    fetchCryptoFearGreed(),
   ])
 
   const payload: SentimentPayload = {
@@ -425,6 +595,7 @@ export async function GET() {
     contango,
     fearGreed,
     aaii,
+    cryptoFearGreed,
     timestamp: new Date().toISOString(),
   }
 
