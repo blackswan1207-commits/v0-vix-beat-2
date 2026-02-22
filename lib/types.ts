@@ -10,6 +10,7 @@ export interface IndicatorData {
   history: HistoricalPoint[]
   error?: string
   lastUpdated: string
+  dataSource?: string
 }
 
 export interface ContangoData extends IndicatorData {

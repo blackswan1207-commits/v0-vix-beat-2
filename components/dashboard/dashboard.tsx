@@ -15,6 +15,19 @@ const fetcher = (url: string) => fetch(url).then((r) => r.json())
 
 const TWO_HOURS = 2 * 60 * 60 * 1000
 
+function formatTimestamp(iso: string): string {
+  try {
+    const d = new Date(iso)
+    const month = String(d.getMonth() + 1).padStart(2, '0')
+    const day = String(d.getDate()).padStart(2, '0')
+    const hours = String(d.getHours()).padStart(2, '0')
+    const minutes = String(d.getMinutes()).padStart(2, '0')
+    return `${d.getFullYear()}-${month}-${day} ${hours}:${minutes}`
+  } catch {
+    return iso
+  }
+}
+
 export function Dashboard() {
   const { data, error, isLoading, isValidating, mutate } = useSWR<SentimentPayload>(
     '/api/sentiment',
@@ -92,6 +105,8 @@ export function Dashboard() {
           error={data?.vix.error}
           subtitle="CBOE Volatility Index - Fear Gauge"
           sparklineColor="auto"
+          lastUpdated={data?.vix.lastUpdated}
+          dataSource={data?.vix.dataSource}
         />
 
         {/* VVIX Panel */}
@@ -103,6 +118,8 @@ export function Dashboard() {
           error={data?.vvix.error}
           subtitle="Volatility of Volatility"
           sparklineColor="auto"
+          lastUpdated={data?.vvix.lastUpdated}
+          dataSource={data?.vvix.dataSource}
         />
 
         {/* Contango Panel */}
@@ -115,6 +132,8 @@ export function Dashboard() {
           error={contango?.error}
           subtitle="Contango = Spread / VIX(F1)"
           sparklineColor="#4fc3f7"
+          lastUpdated={contango?.lastUpdated}
+          dataSource={contango?.dataSource}
           extraInfo={
             <ContangoDetail
               f1={contango?.f1}
@@ -171,6 +190,13 @@ export function Dashboard() {
                   height={36}
                 />
               </div>
+
+              {(fearGreed?.lastUpdated || fearGreed?.dataSource) && (
+                <div className="flex items-center justify-between text-[9px] text-terminal-dim pt-1 border-t border-terminal-border/50">
+                  {fearGreed?.lastUpdated && <span>{formatTimestamp(fearGreed.lastUpdated)}</span>}
+                  {fearGreed?.dataSource && <span>via {fearGreed.dataSource}</span>}
+                </div>
+              )}
             </>
           )}
         </div>
@@ -186,6 +212,8 @@ export function Dashboard() {
           subtitle="US Investor Sentiment Survey"
           sparklineColor="#4fc3f7"
           invertColor
+          lastUpdated={data?.aaii.lastUpdated}
+          dataSource={data?.aaii.dataSource}
         />
 
         {/* Crypto Fear & Greed Panel */}
@@ -226,10 +254,6 @@ export function Dashboard() {
                 classification={cryptoFG?.classification}
               />
 
-              <p className="text-terminal-dim text-[10px]">
-                {'Source: CoinGlass / alternative.me'}
-              </p>
-
               <div className="mt-auto">
                 <Sparkline
                   data={cryptoFG?.history ?? []}
@@ -237,6 +261,13 @@ export function Dashboard() {
                   height={36}
                 />
               </div>
+
+              {(cryptoFG?.lastUpdated || cryptoFG?.dataSource) && (
+                <div className="flex items-center justify-between text-[9px] text-terminal-dim pt-1 border-t border-terminal-border/50">
+                  {cryptoFG?.lastUpdated && <span>{formatTimestamp(cryptoFG.lastUpdated)}</span>}
+                  {cryptoFG?.dataSource && <span>via {cryptoFG.dataSource}</span>}
+                </div>
+              )}
             </>
           )}
         </div>

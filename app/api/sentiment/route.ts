@@ -68,6 +68,7 @@ async function fetchVIX(): Promise<IndicatorData> {
       change,
       history,
       lastUpdated: new Date().toISOString(),
+      dataSource: 'Yahoo Finance',
     }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Unknown error'
@@ -91,6 +92,7 @@ async function fetchVVIX(): Promise<IndicatorData> {
       change,
       history,
       lastUpdated: new Date().toISOString(),
+      dataSource: 'Yahoo Finance',
     }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Unknown error'
@@ -194,6 +196,8 @@ async function fetchContango(): Promise<ContangoData> {
     let f1: number | null = null
     let f2: number | null = null
 
+    let source = ''
+
     // === Primary source: TradingView Scanner API ===
     const [tvF1, tvF2] = await Promise.all([
       fetchTradingViewFuturesPrice(f1Symbol),
@@ -203,6 +207,7 @@ async function fetchContango(): Promise<ContangoData> {
     if (tvF1 !== null && tvF2 !== null) {
       f1 = tvF1
       f2 = tvF2
+      source = 'TradingView'
     }
 
     // === Fallback: Yahoo Finance VIX futures ===
@@ -213,6 +218,7 @@ async function fetchContango(): Promise<ContangoData> {
       ])
       if (vf1 && f1 === null) f1 = vf1.price
       if (vf2 && f2 === null) f2 = vf2.price
+      source = source || 'Yahoo Finance'
     }
 
     if (f1 && f2 && !isNaN(f1) && !isNaN(f2)) {
@@ -232,6 +238,7 @@ async function fetchContango(): Promise<ContangoData> {
         change: null,
         history,
         lastUpdated: new Date().toISOString(),
+        dataSource: source,
       }
     }
 
@@ -293,6 +300,7 @@ async function fetchFearGreed(): Promise<FearGreedData> {
       classification: classification || getClassification(score),
       history,
       lastUpdated: new Date().toISOString(),
+      dataSource: 'CNN',
     }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Unknown error'
@@ -326,15 +334,15 @@ function getCryptoClassification(score: number): string {
 
 async function fetchCryptoFearGreedFromCoinGlass(): Promise<{ value: number; classification: string } | null> {
   try {
-    // CoinGlass renders client-side, but we can try their public-facing page
-    // and look for embedded JSON data or meta tags
+    // CoinGlass renders client-side via JavaScript; server-side HTML has no data.
+    // Try their public-facing page and look for embedded JSON data or meta tags
     const res = await fetch('https://www.coinglass.com/zh-TW/pro/i/FearGreedIndex', {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
       },
-      signal: AbortSignal.timeout(10000),
+      signal: AbortSignal.timeout(8000),
     })
     if (!res.ok) return null
     const html = await res.text()
@@ -344,15 +352,14 @@ async function fetchCryptoFearGreedFromCoinGlass(): Promise<{ value: number; cla
     if (nextDataMatch) {
       try {
         const nextData = JSON.parse(nextDataMatch[1])
-        // Navigate the data structure to find fear & greed value
         const props = nextData?.props?.pageProps
         if (props) {
           const jsonStr = JSON.stringify(props)
-          // Look for fear greed value pattern
+          // Look for fear greed value pattern - must be 1-100
           const fgMatch = jsonStr.match(/"(?:fearGreed|fear_greed|fng|index)"\s*:\s*(\d+)/)
           if (fgMatch) {
             const val = parseInt(fgMatch[1], 10)
-            if (val >= 0 && val <= 100) {
+            if (val >= 1 && val <= 100) {
               return { value: val, classification: getCryptoClassification(val) }
             }
           }
@@ -362,40 +369,7 @@ async function fetchCryptoFearGreedFromCoinGlass(): Promise<{ value: number; cla
       }
     }
 
-    // Try to find any fear/greed value in the page source
-    // CoinGlass often includes data in JSON-LD or meta tags
-    const { load } = await import('cheerio')
-    const $ = load(html)
-
-    // Check meta tags
-    const ogDesc = $('meta[property="og:description"]').attr('content') || ''
-    const descMatch = ogDesc.match(/(\d+)/)
-    if (descMatch) {
-      const val = parseInt(descMatch[1], 10)
-      if (val >= 0 && val <= 100) {
-        return { value: val, classification: getCryptoClassification(val) }
-      }
-    }
-
-    // Check for script tags with embedded data
-    $('script').each((_, el) => {
-      const content = $(el).html() || ''
-      // Look for patterns like "value":8 or fearGreedIndex: 8
-      const patterns = [
-        /(?:fearGreed|fear_greed|fng|greedIndex)[^}]*?(?:"value"|value)\s*[=:]\s*(\d+)/i,
-        /(?:"value"|value)\s*[=:]\s*(\d+)[^}]*?(?:fearGreed|fear_greed|fng|greedIndex)/i,
-      ]
-      for (const pattern of patterns) {
-        const match = content.match(pattern)
-        if (match) {
-          const val = parseInt(match[1], 10)
-          if (val >= 0 && val <= 100) {
-            return { value: val, classification: getCryptoClassification(val) }
-          }
-        }
-      }
-    })
-
+    // CoinGlass is an SPA - most data loaded via JS. Skip unreliable meta-tag scraping.
     return null
   } catch {
     return null
@@ -438,12 +412,14 @@ async function fetchCryptoFearGreed(): Promise<CryptoFearGreedData> {
     let value: number | null = null
     let classification: string | undefined
     let change: number | null = null
+    let source = ''
 
     // === Primary: CoinGlass scraping ===
     const coinglassResult = await fetchCryptoFearGreedFromCoinGlass()
     if (coinglassResult) {
       value = coinglassResult.value
       classification = coinglassResult.classification
+      source = 'CoinGlass'
     }
 
     // === Fallback: alternative.me free API ===
@@ -452,6 +428,7 @@ async function fetchCryptoFearGreed(): Promise<CryptoFearGreedData> {
       if (altResult) {
         value = altResult.value
         classification = altResult.classification
+        source = 'alternative.me'
         if (altResult.previousValue !== null) {
           change = value - altResult.previousValue
         }
@@ -472,6 +449,7 @@ async function fetchCryptoFearGreed(): Promise<CryptoFearGreedData> {
       classification,
       history,
       lastUpdated: new Date().toISOString(),
+      dataSource: source,
     }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Unknown error'
@@ -557,6 +535,7 @@ async function fetchAAII(): Promise<IndicatorData> {
       change: null,
       history,
       lastUpdated: new Date().toISOString(),
+      dataSource: 'ycharts.com',
     }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Unknown error'

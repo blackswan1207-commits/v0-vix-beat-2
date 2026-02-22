@@ -16,6 +16,21 @@ interface MetricPanelProps {
   sparklineColor?: string
   /** If true, positive = red (up), negative = green (down). If false, reversed. */
   invertColor?: boolean
+  lastUpdated?: string
+  dataSource?: string
+}
+
+function formatTimestamp(iso: string): string {
+  try {
+    const d = new Date(iso)
+    const month = String(d.getMonth() + 1).padStart(2, '0')
+    const day = String(d.getDate()).padStart(2, '0')
+    const hours = String(d.getHours()).padStart(2, '0')
+    const minutes = String(d.getMinutes()).padStart(2, '0')
+    return `${d.getFullYear()}-${month}-${day} ${hours}:${minutes}`
+  } catch {
+    return iso
+  }
 }
 
 function formatValue(value: number | null, unit?: string): string {
@@ -50,6 +65,8 @@ export function MetricPanel({
   extraInfo,
   sparklineColor = '#ff8c00',
   invertColor = false,
+  lastUpdated,
+  dataSource,
 }: MetricPanelProps) {
   return (
     <div className="flex flex-col border border-terminal-border bg-terminal-panel p-3 gap-2 min-h-[160px]">
@@ -91,6 +108,14 @@ export function MetricPanel({
           <div className="mt-auto">
             <Sparkline data={history} color={sparklineColor} height={36} />
           </div>
+
+          {/* Timestamp & Source footer */}
+          {(lastUpdated || dataSource) && (
+            <div className="flex items-center justify-between text-[9px] text-terminal-dim pt-1 border-t border-terminal-border/50">
+              {lastUpdated && <span>{formatTimestamp(lastUpdated)}</span>}
+              {dataSource && <span>via {dataSource}</span>}
+            </div>
+          )}
         </>
       )}
     </div>
