@@ -118,6 +118,8 @@ export function Dashboard() {
             <ContangoDetail
               f1={contango?.f1}
               f2={contango?.f2}
+              f1Symbol={contango?.f1Symbol}
+              f2Symbol={contango?.f2Symbol}
               spread={contango?.spread}
             />
           }

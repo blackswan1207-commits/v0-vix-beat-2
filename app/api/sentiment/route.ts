@@ -97,75 +97,121 @@ async function fetchVVIX(): Promise<IndicatorData> {
   }
 }
 
-// ── Contango: VIX Futures from vixcentral.com ──
-async function fetchContango(): Promise<ContangoData> {
-  const label = 'Contango'
+// ── VIX Futures month code mapping ──
+// Jan=F, Feb=G, Mar=H, Apr=J, May=K, Jun=M, Jul=N, Aug=Q, Sep=U, Oct=V, Nov=X, Dec=Z
+const MONTH_CODES = ['F', 'G', 'H', 'J', 'K', 'M', 'N', 'Q', 'U', 'V', 'X', 'Z']
+
+// VIX futures typically expire on the Wednesday 30 days before
+// the 3rd Friday of the following month. Approximate with ~3rd Wednesday of the month.
+function getVixFuturesExpiry(year: number, month: number): Date {
+  // Find the 3rd Wednesday of the given month
+  const d = new Date(year, month, 1)
+  // Day of week: 0=Sun, 3=Wed
+  const firstDay = d.getDay()
+  const firstWed = firstDay <= 3 ? 3 - firstDay + 1 : 7 - firstDay + 3 + 1
+  const thirdWed = firstWed + 14
+  return new Date(year, month, thirdWed)
+}
+
+/**
+ * Determine the front-month (F1) and second-month (F2) VIX futures contract symbols.
+ * If the front month has already expired, roll forward.
+ */
+function getVixFutureSymbols(): { f1Symbol: string; f2Symbol: string; f1Label: string; f2Label: string } {
+  const now = new Date()
+  let f1Month = now.getMonth() // 0-indexed
+  let f1Year = now.getFullYear()
+
+  // Check if the front month contract has expired
+  const expiry = getVixFuturesExpiry(f1Year, f1Month)
+  if (now > expiry) {
+    // Roll to next month
+    f1Month += 1
+    if (f1Month > 11) {
+      f1Month = 0
+      f1Year += 1
+    }
+  }
+
+  let f2Month = f1Month + 1
+  let f2Year = f1Year
+  if (f2Month > 11) {
+    f2Month = 0
+    f2Year += 1
+  }
+
+  const f1Code = MONTH_CODES[f1Month]
+  const f2Code = MONTH_CODES[f2Month]
+  const f1Symbol = `VX${f1Code}${f1Year}`
+  const f2Symbol = `VX${f2Code}${f2Year}`
+
+  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+  const f1Label = `${f1Symbol} (${monthNames[f1Month]} ${f1Year})`
+  const f2Label = `${f2Symbol} (${monthNames[f2Month]} ${f2Year})`
+
+  return { f1Symbol, f2Symbol, f1Label, f2Label }
+}
+
+/**
+ * Fetch a single VIX futures price from TradingView Scanner API
+ * Endpoint: https://scanner.tradingview.com/symbol?symbol=CBOE:<symbol>&fields=close&no_404=true
+ */
+async function fetchTradingViewFuturesPrice(symbol: string): Promise<number | null> {
   try {
-    // Try scraping vixcentral.com for VIX futures data
-    const res = await fetch('http://vixcentral.com', {
+    const url = `https://scanner.tradingview.com/symbol?symbol=CBOE:${symbol}&fields=close&no_404=true`
+    const res = await fetch(url, {
       headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'application/json',
       },
       signal: AbortSignal.timeout(10000),
     })
+    if (!res.ok) return null
+    const json = await res.json()
+    // Response format: { "close": 20.223, ... } or with pipe notation
+    const close = json?.close ?? json?.['close|1D'] ?? json?.['close']
+    if (typeof close === 'number' && !isNaN(close)) return close
+    // Try to find any numeric close-like field
+    for (const key of Object.keys(json)) {
+      if (key.startsWith('close')) {
+        const v = parseFloat(json[key])
+        if (!isNaN(v)) return v
+      }
+    }
+    return null
+  } catch {
+    return null
+  }
+}
 
-    if (!res.ok) throw new Error(`vixcentral HTTP ${res.status}`)
+// ── Contango: VIX Futures from TradingView Scanner API (primary) ──
+async function fetchContango(): Promise<ContangoData> {
+  const label = 'Contango'
+  const { f1Symbol, f2Symbol, f1Label, f2Label } = getVixFutureSymbols()
 
-    const html = await res.text()
-
-    // Try to parse futures data from the page
-    // vixcentral stores data in JavaScript variables
+  try {
     let f1: number | null = null
     let f2: number | null = null
 
-    // Look for futures data in script tags
-    const futuresMatch = html.match(/var defined_data\s*=\s*(\[[\s\S]*?\]);/)
-    if (futuresMatch) {
-      try {
-        const data = JSON.parse(futuresMatch[1])
-        if (Array.isArray(data) && data.length >= 2) {
-          // data format: array of [month, price] or just prices
-          if (Array.isArray(data[0])) {
-            f1 = parseFloat(data[0][1])
-            f2 = parseFloat(data[1][1])
-          } else {
-            f1 = parseFloat(data[0])
-            f2 = parseFloat(data[1])
-          }
-        }
-      } catch {
-        // JSON parse failed, try alternate pattern
-      }
+    // === Primary source: TradingView Scanner API ===
+    const [tvF1, tvF2] = await Promise.all([
+      fetchTradingViewFuturesPrice(f1Symbol),
+      fetchTradingViewFuturesPrice(f2Symbol),
+    ])
+
+    if (tvF1 !== null && tvF2 !== null) {
+      f1 = tvF1
+      f2 = tvF2
     }
 
-    // Try alternate patterns if above failed
-    if (!f1 || !f2) {
-      // Look for futures_data or similar
-      const altMatch = html.match(/futures_data[^=]*=\s*(\[[\s\S]*?\]);/)
-      if (altMatch) {
-        try {
-          const data = JSON.parse(altMatch[1])
-          if (Array.isArray(data) && data.length >= 2) {
-            f1 = typeof data[0] === 'number' ? data[0] : parseFloat(data[0])
-            f2 = typeof data[1] === 'number' ? data[1] : parseFloat(data[1])
-          }
-        } catch {
-          // parse failed
-        }
-      }
-    }
-
-    // If scraping failed, try using Yahoo Finance for VIX futures
-    if (!f1 || !f2 || isNaN(f1) || isNaN(f2)) {
-      // Attempt Yahoo Finance VIX futures
+    // === Fallback: Yahoo Finance VIX futures ===
+    if (f1 === null || f2 === null) {
       const [vf1, vf2] = await Promise.all([
-        fetchYahooQuote('VX=F'),  // Front month VIX future
-        fetchYahooQuote('VXV2=F'), // Second month
+        fetchYahooQuote('VX=F'),   // Front month VIX future
+        fetchYahooQuote('VX2=F'),  // Second month
       ])
-
-      if (vf1) f1 = vf1.price
-      if (vf2) f2 = vf2.price
+      if (vf1 && f1 === null) f1 = vf1.price
+      if (vf2 && f2 === null) f2 = vf2.price
     }
 
     if (f1 && f2 && !isNaN(f1) && !isNaN(f2)) {
@@ -179,6 +225,8 @@ async function fetchContango(): Promise<ContangoData> {
         value: contango,
         f1,
         f2,
+        f1Symbol: f1Label,
+        f2Symbol: f2Label,
         spread,
         change: null,
         history,
@@ -186,17 +234,17 @@ async function fetchContango(): Promise<ContangoData> {
       }
     }
 
-    // If all attempts failed, throw error
     throw new Error(
-      'vixcentral scraping + Yahoo VIX futures both failed to yield F1/F2 data'
+      `TradingView (${f1Symbol}, ${f2Symbol}) + Yahoo VIX futures 均無法取得 F1/F2 數據`
     )
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Unknown error'
-    // Return error state per strict rules: show error, never fabricate
     return {
       ...makeError(label, `Error: 無法取得真實連線，需更換資料源 - ${msg}`),
       f1: null,
       f2: null,
+      f1Symbol: f1Label,
+      f2Symbol: f2Label,
       spread: null,
     }
   }

@@ -15,6 +15,8 @@ export interface IndicatorData {
 export interface ContangoData extends IndicatorData {
   f1?: number | null
   f2?: number | null
+  f1Symbol?: string
+  f2Symbol?: string
   spread?: number | null
 }
 
