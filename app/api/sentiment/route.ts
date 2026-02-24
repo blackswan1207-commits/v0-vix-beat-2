@@ -100,114 +100,109 @@ async function fetchVVIX(): Promise<IndicatorData> {
   }
 }
 
-// ── VIX Futures month code mapping ──
-// Jan=F, Feb=G, Mar=H, Apr=J, May=K, Jun=M, Jul=N, Aug=Q, Sep=U, Oct=V, Nov=X, Dec=Z
-const MONTH_CODES = ['F', 'G', 'H', 'J', 'K', 'M', 'N', 'Q', 'U', 'V', 'X', 'Z']
+// ── Contango: Dynamically discover F1/F2 from TradingView Scanner API ──
 
-// VIX futures typically expire on the Wednesday 30 days before
-// the 3rd Friday of the following month. Approximate with ~3rd Wednesday of the month.
-function getVixFuturesExpiry(year: number, month: number): Date {
-  // Find the 3rd Wednesday of the given month
-  const d = new Date(year, month, 1)
-  // Day of week: 0=Sun, 3=Wed
-  const firstDay = d.getDay()
-  const firstWed = firstDay <= 3 ? 3 - firstDay + 1 : 7 - firstDay + 3 + 1
-  const thirdWed = firstWed + 14
-  return new Date(year, month, thirdWed)
+interface VixFuturesContract {
+  symbol: string       // e.g. "VXH2026"
+  price: number        // close price
+  description: string  // e.g. "Cboe Volatility Index (VIX) Futures (Mar 2026)"
+  expiration: number   // YYYYMMDD integer, e.g. 20260318
 }
 
 /**
- * Determine the front-month (F1) and second-month (F2) VIX futures contract symbols.
- * If the front month has already expired, roll forward.
+ * Query TradingView Scanner API for all currently active VIX futures.
+ * Filter for standard VIX contracts (exclude Mini VXM, exclude continuous VX1!).
+ * Sort by expiration ascending. Return the full list.
  */
-function getVixFutureSymbols(): { f1Symbol: string; f2Symbol: string; f1Label: string; f2Label: string } {
-  const now = new Date()
-  let f1Month = now.getMonth() // 0-indexed
-  let f1Year = now.getFullYear()
-
-  // Check if the front month contract has expired
-  const expiry = getVixFuturesExpiry(f1Year, f1Month)
-  if (now > expiry) {
-    // Roll to next month
-    f1Month += 1
-    if (f1Month > 11) {
-      f1Month = 0
-      f1Year += 1
-    }
+async function fetchActiveVixFutures(): Promise<VixFuturesContract[]> {
+  const body = {
+    columns: ['close', 'description', 'expiration'],
+    filter: [
+      { left: 'exchange', operation: 'equal', right: 'CBOE' },
+      { left: 'name', operation: 'match', right: 'VX' },
+    ],
+    options: { lang: 'en' },
+    range: [0, 50],
+    sort: { sortBy: 'expiration', sortOrder: 'asc' },
+    symbols: {},
   }
 
-  let f2Month = f1Month + 1
-  let f2Year = f1Year
-  if (f2Month > 11) {
-    f2Month = 0
-    f2Year += 1
-  }
+  const res = await fetch('https://scanner.tradingview.com/futures/scan', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(10000),
+  })
 
-  const f1Code = MONTH_CODES[f1Month]
-  const f2Code = MONTH_CODES[f2Month]
-  const f1Symbol = `VX${f1Code}${f1Year}`
-  const f2Symbol = `VX${f2Code}${f2Year}`
+  if (!res.ok) throw new Error(`TradingView Scanner HTTP ${res.status}`)
 
-  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-  const f1Label = `${f1Symbol} (${monthNames[f1Month]} ${f1Year})`
-  const f2Label = `${f2Symbol} (${monthNames[f2Month]} ${f2Year})`
+  const json = await res.json()
+  const data = json?.data
+  if (!Array.isArray(data)) throw new Error('Invalid TradingView Scanner response')
 
-  return { f1Symbol, f2Symbol, f1Label, f2Label }
-}
+  const contracts: VixFuturesContract[] = []
 
-/**
- * Fetch a single VIX futures price from TradingView Scanner API
- * Endpoint: https://scanner.tradingview.com/symbol?symbol=CBOE:<symbol>&fields=close&no_404=true
- */
-async function fetchTradingViewFuturesPrice(symbol: string): Promise<number | null> {
-  try {
-    const url = `https://scanner.tradingview.com/symbol?symbol=CBOE:${symbol}&fields=close&no_404=true`
-    const res = await fetch(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': 'application/json',
-      },
-      signal: AbortSignal.timeout(10000),
+  for (const item of data) {
+    const fullSymbol: string = item.s // e.g. "CBOE:VXH2026"
+    const [, symbol] = fullSymbol.split(':') // "VXH2026"
+
+    // Skip if not a symbol we can parse
+    if (!symbol) continue
+
+    // Skip continuous contracts (e.g. "VX1!", "VXM1!")
+    if (symbol.includes('!')) continue
+
+    // Skip Mini VXM contracts (symbol starts with VXM followed by letter)
+    // Standard VIX: VX + month_code + year (e.g. VXH2026)
+    // Mini VIX:     VXM + month_code + year (e.g. VXMH2026)
+    if (symbol.startsWith('VXM')) continue
+
+    const [close, description, expiration] = item.d
+    if (typeof close !== 'number' || !expiration) continue
+
+    contracts.push({
+      symbol,
+      price: close,
+      description: description || symbol,
+      expiration: expiration,
     })
-    if (!res.ok) return null
-    const json = await res.json()
-    // Response format: { "close": 20.223, ... } or with pipe notation
-    const close = json?.close ?? json?.['close|1D'] ?? json?.['close']
-    if (typeof close === 'number' && !isNaN(close)) return close
-    // Try to find any numeric close-like field
-    for (const key of Object.keys(json)) {
-      if (key.startsWith('close')) {
-        const v = parseFloat(json[key])
-        if (!isNaN(v)) return v
-      }
-    }
-    return null
-  } catch {
-    return null
   }
+
+  // Sort by expiration date ascending (nearest first)
+  contracts.sort((a, b) => a.expiration - b.expiration)
+
+  return contracts
 }
 
-// ── Contango: VIX Futures from TradingView Scanner API (primary) ──
 async function fetchContango(): Promise<ContangoData> {
   const label = 'Contango'
-  const { f1Symbol, f2Symbol, f1Label, f2Label } = getVixFutureSymbols()
+  let f1Label = 'VIX(F1)'
+  let f2Label = 'VIX(F2)'
 
   try {
     let f1: number | null = null
     let f2: number | null = null
-
     let source = ''
 
-    // === Primary source: TradingView Scanner API ===
-    const [tvF1, tvF2] = await Promise.all([
-      fetchTradingViewFuturesPrice(f1Symbol),
-      fetchTradingViewFuturesPrice(f2Symbol),
-    ])
+    // === Primary: TradingView Scanner — discover all active contracts dynamically ===
+    try {
+      const contracts = await fetchActiveVixFutures()
 
-    if (tvF1 !== null && tvF2 !== null) {
-      f1 = tvF1
-      f2 = tvF2
-      source = 'TradingView'
+      if (contracts.length >= 2) {
+        const front = contracts[0] // Nearest expiration = F1
+        const second = contracts[1] // Second nearest = F2
+
+        f1 = front.price
+        f2 = second.price
+        f1Label = `${front.symbol} (${front.description.match(/\(([^)]+)\)/)?.[1] || front.symbol})`
+        f2Label = `${second.symbol} (${second.description.match(/\(([^)]+)\)/)?.[1] || second.symbol})`
+        source = 'TradingView'
+      }
+    } catch {
+      // TradingView scan failed, will fall through to Yahoo
     }
 
     // === Fallback: Yahoo Finance VIX futures ===
@@ -216,8 +211,8 @@ async function fetchContango(): Promise<ContangoData> {
         fetchYahooQuote('VX=F'),   // Front month VIX future
         fetchYahooQuote('VX2=F'),  // Second month
       ])
-      if (vf1 && f1 === null) f1 = vf1.price
-      if (vf2 && f2 === null) f2 = vf2.price
+      if (vf1 && f1 === null) { f1 = vf1.price; f1Label = 'VX=F (F1)' }
+      if (vf2 && f2 === null) { f2 = vf2.price; f2Label = 'VX2=F (F2)' }
       source = source || 'Yahoo Finance'
     }
 
@@ -242,9 +237,7 @@ async function fetchContango(): Promise<ContangoData> {
       }
     }
 
-    throw new Error(
-      `TradingView (${f1Symbol}, ${f2Symbol}) + Yahoo VIX futures 均無法取得 F1/F2 數據`
-    )
+    throw new Error('TradingView Scanner + Yahoo VIX futures 均無法取得 F1/F2 數據')
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Unknown error'
     return {
