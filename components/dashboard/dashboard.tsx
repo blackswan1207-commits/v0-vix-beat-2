@@ -1,12 +1,13 @@
 'use client'
 
 import useSWR from 'swr'
-import type { SentimentPayload, ContangoData, FearGreedData, CryptoFearGreedData } from '@/lib/types'
+import type { SentimentPayload, ContangoData, FearGreedData, CryptoFearGreedData, CanaryData } from '@/lib/types'
 import { HeaderClock } from './header-clock'
 import { MetricPanel } from './metric-panel'
 import { Sparkline } from './sparkline'
 import { FearGreedGauge } from './fear-greed-gauge'
 import { ContangoDetail } from './contango-detail'
+import { CanaryDetail } from './canary-detail'
 import { PlaceholderPanel } from './placeholder-panel'
 import { StatusBar } from './status-bar'
 import { Activity, AlertTriangle, RefreshCw } from 'lucide-react'
@@ -40,7 +41,7 @@ export function Dashboard() {
   )
 
   const errorCount = data
-    ? [data.vix, data.vvix, data.contango, data.fearGreed, data.aaii, data.cryptoFearGreed].filter(
+    ? [data.vix, data.vvix, data.contango, data.fearGreed, data.aaii, data.cryptoFearGreed, data.canary].filter(
         (d) => d.error
       ).length
     : 0
@@ -79,6 +80,7 @@ export function Dashboard() {
   const contango = data?.contango as ContangoData | undefined
   const fearGreed = data?.fearGreed as FearGreedData | undefined
   const cryptoFG = data?.cryptoFearGreed as CryptoFearGreedData | undefined
+  const canary = data?.canary as CanaryData | undefined
 
   return (
     <div className="min-h-screen bg-terminal-bg flex flex-col">
@@ -266,6 +268,72 @@ export function Dashboard() {
                 <div className="flex items-center justify-between text-[9px] text-terminal-dim pt-1 border-t border-terminal-border/50">
                   {cryptoFG?.lastUpdated && <span>{formatTimestamp(cryptoFG.lastUpdated)}</span>}
                   {cryptoFG?.dataSource && <span>via {cryptoFG.dataSource}</span>}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+
+        {/* Canary Ratio Panel */}
+        <div className="flex flex-col border border-terminal-border bg-terminal-panel p-3 gap-2 min-h-[160px]">
+          <div className="flex items-center justify-between">
+            <h3 className="text-terminal-orange text-xs font-bold uppercase tracking-wider">
+              Canary Ratio
+            </h3>
+            <div className="flex items-center gap-2">
+              <span className="text-[9px] text-terminal-dim">Monthly</span>
+              <div className="h-1.5 w-1.5 rounded-full bg-terminal-green animate-blink-dot" aria-hidden="true" />
+            </div>
+          </div>
+
+          {canary?.error ? (
+            <div className="flex-1 flex flex-col items-center justify-center gap-2 text-center">
+              <AlertTriangle className="h-5 w-5 text-terminal-red" />
+              <p className="text-terminal-red text-[10px] leading-tight">{canary.error}</p>
+            </div>
+          ) : (
+            <>
+              <div className="flex items-baseline gap-2">
+                <span className="text-2xl font-bold text-foreground tabular-nums animate-pulse-glow">
+                  {canary?.value != null ? `${canary.value}%` : '--'}
+                </span>
+                <span
+                  className={`text-xs font-bold ${
+                    canary?.value === 100
+                      ? 'text-terminal-green'
+                      : canary?.value === 0
+                      ? 'text-terminal-red'
+                      : 'text-yellow-500'
+                  }`}
+                >
+                  {canary?.value === 100 ? 'RISK ON' : canary?.value === 0 ? 'RISK OFF' : 'PARTIAL'}
+                </span>
+              </div>
+
+              <p className="text-terminal-dim text-[10px]">
+                VWO(M) + BND(M) momentum signal
+              </p>
+
+              <CanaryDetail
+                vwoMomentum={canary?.vwoMomentum}
+                bndMomentum={canary?.bndMomentum}
+                n={canary?.n}
+                vwoReturns={canary?.vwoReturns}
+                bndReturns={canary?.bndReturns}
+              />
+
+              <div className="mt-auto">
+                <Sparkline
+                  data={canary?.history ?? []}
+                  color="#9c27b0"
+                  height={36}
+                />
+              </div>
+
+              {(canary?.lastUpdated || canary?.dataSource) && (
+                <div className="flex items-center justify-between text-[9px] text-terminal-dim pt-1 border-t border-terminal-border/50">
+                  {canary?.lastUpdated && <span>{formatTimestamp(canary.lastUpdated)}</span>}
+                  {canary?.dataSource && <span>Data: {canary.dataSource}</span>}
                 </div>
               )}
             </>

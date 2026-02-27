@@ -6,7 +6,10 @@ import type {
   ContangoData,
   FearGreedData,
   CryptoFearGreedData,
+  CanaryData,
 } from '@/lib/types'
+import { promises as fs } from 'fs'
+import path from 'path'
 
 const CACHE_KEY = 'sentiment-data'
 
@@ -241,7 +244,7 @@ async function fetchContango(): Promise<ContangoData> {
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Unknown error'
     return {
-      ...makeError(label, `Error: 無法取得真實連線，需更換資料源 - ${msg}`),
+      ...makeError(label, `Error: 無法取��真實連線，需更換資料源 - ${msg}`),
       f1: null,
       f2: null,
       f1Symbol: f1Label,
@@ -539,6 +542,184 @@ async function fetchAAII(): Promise<IndicatorData> {
   }
 }
 
+// ── Canary Ratio (VWO + BND Momentum) ──
+
+interface MonthlyPriceRecord {
+  date: string  // YYYY-MM-DD
+  price: number
+}
+
+/**
+ * Parse CSV file and extract monthly data (first trading day of each month)
+ */
+async function parseMonthlyData(filePath: string): Promise<MonthlyPriceRecord[]> {
+  const content = await fs.readFile(filePath, 'utf-8')
+  const lines = content.trim().split('\n').slice(1) // skip header
+
+  const dailyData: { date: string; price: number }[] = []
+
+  for (const line of lines) {
+    const [date, priceStr] = line.split(',')
+    if (!date || !priceStr) continue
+    const price = parseFloat(priceStr)
+    if (isNaN(price)) continue
+    dailyData.push({ date: date.trim(), price })
+  }
+
+  // Sort by date ascending
+  dailyData.sort((a, b) => a.date.localeCompare(b.date))
+
+  // Extract first trading day of each month
+  const monthlyData: MonthlyPriceRecord[] = []
+  let lastMonth = ''
+
+  for (const row of dailyData) {
+    const month = row.date.slice(0, 7) // YYYY-MM
+    if (month !== lastMonth) {
+      monthlyData.push({ date: row.date, price: row.price })
+      lastMonth = month
+    }
+  }
+
+  return monthlyData
+}
+
+/**
+ * Fetch latest ETF price from Yahoo Finance and append to monthly data if new month
+ */
+async function fetchLatestMonthlyPrice(symbol: string, monthlyData: MonthlyPriceRecord[]): Promise<MonthlyPriceRecord[]> {
+  const now = new Date()
+  const currentMonth = now.toISOString().slice(0, 7) // YYYY-MM
+
+  // Check if we already have data for current month
+  const lastRecord = monthlyData[monthlyData.length - 1]
+  if (lastRecord && lastRecord.date.slice(0, 7) === currentMonth) {
+    return monthlyData // Already have this month's data
+  }
+
+  // Fetch current price from Yahoo Finance
+  try {
+    const quote = await fetchYahooQuote(symbol)
+    if (quote) {
+      const today = now.toISOString().slice(0, 10)
+      return [...monthlyData, { date: today, price: quote.price }]
+    }
+  } catch {
+    // Failed to fetch, use existing data
+  }
+
+  return monthlyData
+}
+
+/**
+ * Calculate return between two prices
+ */
+function calcReturn(currentPrice: number, pastPrice: number): number {
+  return (currentPrice - pastPrice) / pastPrice
+}
+
+/**
+ * Calculate momentum score:
+ * M = 1M_return * 12 + 3M_return * 4 + 6M_return * 2 + 12M_return * 1
+ */
+function calcMomentum(
+  data: MonthlyPriceRecord[],
+  currentIdx: number
+): { momentum: number; returns: { m1: number | null; m3: number | null; m6: number | null; m12: number | null } } | null {
+  if (currentIdx < 12 || currentIdx >= data.length) return null
+
+  const current = data[currentIdx].price
+  const m1Idx = currentIdx - 1
+  const m3Idx = currentIdx - 3
+  const m6Idx = currentIdx - 6
+  const m12Idx = currentIdx - 12
+
+  if (m1Idx < 0 || m3Idx < 0 || m6Idx < 0 || m12Idx < 0) return null
+
+  const r1 = calcReturn(current, data[m1Idx].price)
+  const r3 = calcReturn(current, data[m3Idx].price)
+  const r6 = calcReturn(current, data[m6Idx].price)
+  const r12 = calcReturn(current, data[m12Idx].price)
+
+  const momentum = r1 * 12 + r3 * 4 + r6 * 2 + r12 * 1
+
+  return {
+    momentum,
+    returns: {
+      m1: r1 * 100,   // convert to percentage
+      m3: r3 * 100,
+      m6: r6 * 100,
+      m12: r12 * 100,
+    },
+  }
+}
+
+async function fetchCanaryRatio(): Promise<CanaryData> {
+  const label = 'Canary Ratio'
+
+  try {
+    // Read historical data from CSV files
+    const vwoPath = path.join(process.cwd(), 'data', 'vwo_history.csv')
+    const bndPath = path.join(process.cwd(), 'data', 'bnd_history.csv')
+
+    let vwoMonthly = await parseMonthlyData(vwoPath)
+    let bndMonthly = await parseMonthlyData(bndPath)
+
+    // Fetch latest prices and append if new month
+    vwoMonthly = await fetchLatestMonthlyPrice('VWO', vwoMonthly)
+    bndMonthly = await fetchLatestMonthlyPrice('BND', bndMonthly)
+
+    // Calculate momentum for the most recent month
+    const vwoResult = calcMomentum(vwoMonthly, vwoMonthly.length - 1)
+    const bndResult = calcMomentum(bndMonthly, bndMonthly.length - 1)
+
+    if (!vwoResult || !bndResult) {
+      throw new Error('Not enough historical data to calculate momentum (need 12+ months)')
+    }
+
+    const vwoM = vwoResult.momentum
+    const bndM = bndResult.momentum
+
+    // Count how many momentums are positive
+    let n = 0
+    if (vwoM > 0) n++
+    if (bndM > 0) n++
+
+    // Determine Canary Ratio
+    let canaryRatio: number
+    if (n === 0) canaryRatio = 0
+    else if (n === 1) canaryRatio = 50
+    else canaryRatio = 100
+
+    const today = todayStr()
+    const history = appendHistory(label, { date: today, value: canaryRatio })
+
+    return {
+      label,
+      value: canaryRatio,
+      change: null,
+      vwoMomentum: vwoM,
+      bndMomentum: bndM,
+      n,
+      vwoReturns: vwoResult.returns,
+      bndReturns: bndResult.returns,
+      history,
+      lastUpdated: new Date().toISOString(),
+      dataSource: `VWO: ${vwoMonthly[vwoMonthly.length - 1]?.date}, BND: ${bndMonthly[bndMonthly.length - 1]?.date}`,
+    }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Unknown error'
+    return {
+      ...makeError(label, `Error: 無法計算 Canary Ratio - ${msg}`),
+      vwoMomentum: null,
+      bndMomentum: null,
+      n: undefined,
+      vwoReturns: undefined,
+      bndReturns: undefined,
+    }
+  }
+}
+
 // ── Main API Route ──
 export async function GET() {
   // Check cache first
@@ -552,13 +733,14 @@ export async function GET() {
   }
 
   // Fetch all indicators in parallel
-  const [vix, vvix, contango, fearGreed, aaii, cryptoFearGreed] = await Promise.all([
+  const [vix, vvix, contango, fearGreed, aaii, cryptoFearGreed, canary] = await Promise.all([
     fetchVIX(),
     fetchVVIX(),
     fetchContango(),
     fetchFearGreed(),
     fetchAAII(),
     fetchCryptoFearGreed(),
+    fetchCanaryRatio(),
   ])
 
   const payload: SentimentPayload = {
@@ -568,6 +750,7 @@ export async function GET() {
     fearGreed,
     aaii,
     cryptoFearGreed,
+    canary,
     timestamp: new Date().toISOString(),
   }
 

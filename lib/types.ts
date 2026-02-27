@@ -29,6 +29,24 @@ export interface CryptoFearGreedData extends IndicatorData {
   classification?: string
 }
 
+export interface CanaryData extends IndicatorData {
+  vwoMomentum?: number | null
+  bndMomentum?: number | null
+  n?: number  // count of positive momentums (0, 1, or 2)
+  vwoReturns?: {
+    m1: number | null
+    m3: number | null
+    m6: number | null
+    m12: number | null
+  }
+  bndReturns?: {
+    m1: number | null
+    m3: number | null
+    m6: number | null
+    m12: number | null
+  }
+}
+
 export interface SentimentPayload {
   vix: IndicatorData
   vvix: IndicatorData
@@ -36,5 +54,6 @@ export interface SentimentPayload {
   fearGreed: FearGreedData
   aaii: IndicatorData
   cryptoFearGreed: CryptoFearGreedData
+  canary: CanaryData
   timestamp: string
 }
