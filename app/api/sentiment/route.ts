@@ -10,8 +10,6 @@ import type {
   FbiData,
   FbiRankingItem,
 } from '@/lib/types'
-import { promises as fs } from 'fs'
-import path from 'path'
 
 const CACHE_KEY = 'sentiment-data'
 
@@ -552,62 +550,47 @@ interface MonthlyPriceRecord {
 }
 
 /**
- * Parse CSV file and extract monthly data (first trading day of each month)
+ * Fetch monthly historical prices from Yahoo Finance v8 chart API
+ * Returns last 13 months of monthly data for momentum calculation
  */
-async function parseMonthlyData(filePath: string): Promise<MonthlyPriceRecord[]> {
-  const content = await fs.readFile(filePath, 'utf-8')
-  const lines = content.trim().split('\n').slice(1) // skip header
+async function fetchYahooMonthlyHistory(symbol: string): Promise<MonthlyPriceRecord[]> {
+  // Fetch 400 days of data to ensure we have 13+ months
+  const now = Math.floor(Date.now() / 1000)
+  const period1 = now - 400 * 24 * 60 * 60  // 400 days ago
+  const period2 = now
 
-  const dailyData: { date: string; price: number }[] = []
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?period1=${period1}&period2=${period2}&interval=1mo`
 
-  for (const line of lines) {
-    const [date, priceStr] = line.split(',')
-    if (!date || !priceStr) continue
-    const price = parseFloat(priceStr)
-    if (isNaN(price)) continue
-    dailyData.push({ date: date.trim(), price })
+  const res = await fetch(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    },
+    signal: AbortSignal.timeout(15000),
+  })
+
+  if (!res.ok) throw new Error(`Yahoo Finance HTTP ${res.status}`)
+
+  const json = await res.json()
+  const result = json?.chart?.result?.[0]
+  if (!result) throw new Error('Invalid Yahoo Finance response')
+
+  const timestamps = result.timestamp
+  const closes = result.indicators?.quote?.[0]?.close
+
+  if (!timestamps || !closes || timestamps.length === 0) {
+    throw new Error('No historical data from Yahoo Finance')
   }
 
-  // Sort by date ascending
-  dailyData.sort((a, b) => a.date.localeCompare(b.date))
-
-  // Extract first trading day of each month
   const monthlyData: MonthlyPriceRecord[] = []
-  let lastMonth = ''
 
-  for (const row of dailyData) {
-    const month = row.date.slice(0, 7) // YYYY-MM
-    if (month !== lastMonth) {
-      monthlyData.push({ date: row.date, price: row.price })
-      lastMonth = month
-    }
-  }
+  for (let i = 0; i < timestamps.length; i++) {
+    const ts = timestamps[i]
+    const price = closes[i]
+    if (ts == null || price == null || isNaN(price)) continue
 
-  return monthlyData
-}
-
-/**
- * Fetch latest ETF price from Yahoo Finance and append to monthly data if new month
- */
-async function fetchLatestMonthlyPrice(symbol: string, monthlyData: MonthlyPriceRecord[]): Promise<MonthlyPriceRecord[]> {
-  const now = new Date()
-  const currentMonth = now.toISOString().slice(0, 7) // YYYY-MM
-
-  // Check if we already have data for current month
-  const lastRecord = monthlyData[monthlyData.length - 1]
-  if (lastRecord && lastRecord.date.slice(0, 7) === currentMonth) {
-    return monthlyData // Already have this month's data
-  }
-
-  // Fetch current price from Yahoo Finance
-  try {
-    const quote = await fetchYahooQuote(symbol)
-    if (quote) {
-      const today = now.toISOString().slice(0, 10)
-      return [...monthlyData, { date: today, price: quote.price }]
-    }
-  } catch {
-    // Failed to fetch, use existing data
+    const d = new Date(ts * 1000)
+    const dateStr = d.toISOString().slice(0, 10)
+    monthlyData.push({ date: dateStr, price })
   }
 
   return monthlyData
@@ -660,23 +643,22 @@ async function fetchCanaryRatio(): Promise<CanaryData> {
   const label = 'Canary Ratio'
 
   try {
-    // Read historical data from CSV files
-    const vwoPath = path.join(process.cwd(), 'data', 'vwo_history.csv')
-    const bndPath = path.join(process.cwd(), 'data', 'bnd_history.csv')
+    // Fetch monthly historical data from Yahoo Finance
+    const [vwoMonthly, bndMonthly] = await Promise.all([
+      fetchYahooMonthlyHistory('VWO'),
+      fetchYahooMonthlyHistory('BND'),
+    ])
 
-    let vwoMonthly = await parseMonthlyData(vwoPath)
-    let bndMonthly = await parseMonthlyData(bndPath)
-
-    // Fetch latest prices and append if new month
-    vwoMonthly = await fetchLatestMonthlyPrice('VWO', vwoMonthly)
-    bndMonthly = await fetchLatestMonthlyPrice('BND', bndMonthly)
+    if (vwoMonthly.length < 13 || bndMonthly.length < 13) {
+      throw new Error('Not enough historical data from Yahoo Finance (need 13+ months)')
+    }
 
     // Calculate momentum for the most recent month
     const vwoResult = calcMomentum(vwoMonthly, vwoMonthly.length - 1)
     const bndResult = calcMomentum(bndMonthly, bndMonthly.length - 1)
 
     if (!vwoResult || !bndResult) {
-      throw new Error('Not enough historical data to calculate momentum (need 12+ months)')
+      throw new Error('Unable to calculate momentum (insufficient data points)')
     }
 
     const vwoM = vwoResult.momentum
