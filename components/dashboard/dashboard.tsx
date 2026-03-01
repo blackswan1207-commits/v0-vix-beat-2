@@ -8,7 +8,7 @@ import { Sparkline } from './sparkline'
 import { FearGreedGauge } from './fear-greed-gauge'
 import { ContangoDetail } from './contango-detail'
 import { CanaryDetail } from './canary-detail'
-import { PlaceholderPanel } from './placeholder-panel'
+import { FbiPanel } from './fbi-panel'
 import { StatusBar } from './status-bar'
 import { Activity, AlertTriangle, RefreshCw } from 'lucide-react'
 
@@ -41,7 +41,7 @@ export function Dashboard() {
   )
 
   const errorCount = data
-    ? [data.vix, data.vvix, data.contango, data.fearGreed, data.aaii, data.cryptoFearGreed, data.canary].filter(
+    ? [data.vix, data.vvix, data.contango, data.fearGreed, data.aaii, data.cryptoFearGreed, data.canary, data.fbi].filter(
         (d) => d.error
       ).length
     : 0
@@ -340,8 +340,8 @@ export function Dashboard() {
           )}
         </div>
 
-        {/* Placeholder for Phase 2 */}
-        <PlaceholderPanel />
+        {/* FBI Stock Ranking Panel */}
+        <FbiPanel data={data?.fbi} />
       </main>
 
       {/* Bottom Status Bar */}

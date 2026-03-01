@@ -7,6 +7,8 @@ import type {
   FearGreedData,
   CryptoFearGreedData,
   CanaryData,
+  FbiData,
+  FbiRankingItem,
 } from '@/lib/types'
 import { promises as fs } from 'fs'
 import path from 'path'
@@ -720,6 +722,141 @@ async function fetchCanaryRatio(): Promise<CanaryData> {
   }
 }
 
+// ── FBI (Fund Bias Index) from fundhot.com ──
+async function fetchFBI(): Promise<FbiData> {
+  const label = 'FBI股票排行'
+  try {
+    const res = await fetch('https://fundhot.com/', {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+      },
+      signal: AbortSignal.timeout(15000),
+    })
+
+    if (!res.ok) throw new Error(`fundhot.com HTTP ${res.status}`)
+
+    const html = await res.text()
+    const { load } = await import('cheerio')
+    const $ = load(html)
+
+    // Find the date from the page - look for "股票FBI排行" section header with date
+    let dataDate = ''
+    const fbiHeaderText = $('body').text()
+    const dateMatch = fbiHeaderText.match(/股票FBI排行\s*(\d{4}-\d{2}-\d{2})/)
+    if (dateMatch) {
+      dataDate = dateMatch[1]
+    }
+
+    // Parse the FBI ranking tables
+    // The page structure shows negative bias items followed by positive bias items
+    // Based on the page content, we look for the pattern: name followed by percentage
+    const negativeBias: FbiRankingItem[] = []
+    const positiveBias: FbiRankingItem[] = []
+
+    // The content shows items like: [印尼] -2.1%, [美國科技] -1.14%, etc.
+    // Let's find all FBI ranking items from the page text
+    const pageText = $('body').text()
+
+    // Find the FBI section - look for patterns after "負乖離" and "正乖離"
+    const negSection = pageText.match(/負乖離([\s\S]*?)正乖離/)
+    const posSection = pageText.match(/正乖離([\s\S]*?)(?:債券FBI|匯率FBI|$)/)
+
+    // Pattern: Chinese name followed by percentage
+    const itemPattern = /\[([^\]]+)\]\s*(-?\d+\.?\d*)%/g
+
+    if (negSection) {
+      let match
+      while ((match = itemPattern.exec(negSection[1])) !== null) {
+        negativeBias.push({
+          name: match[1].trim(),
+          value: parseFloat(match[2]),
+        })
+      }
+    }
+
+    // Reset regex lastIndex
+    itemPattern.lastIndex = 0
+
+    if (posSection) {
+      let match
+      while ((match = itemPattern.exec(posSection[1])) !== null) {
+        positiveBias.push({
+          name: match[1].trim(),
+          value: parseFloat(match[2]),
+        })
+      }
+    }
+
+    // If the bracket pattern didn't work, try a different approach
+    // The page shows items as plain text like "印尼 -2.1%"
+    if (negativeBias.length === 0 || positiveBias.length === 0) {
+      // Alternative pattern without brackets
+      const altPattern = /([^\d\s\[\]%]+?)\s*(-?\d+\.?\d*)%/g
+
+      if (negSection && negativeBias.length === 0) {
+        let match
+        while ((match = altPattern.exec(negSection[1])) !== null) {
+          const name = match[1].trim()
+          if (name.length > 0 && name.length < 20 && !name.includes('乖離')) {
+            negativeBias.push({
+              name,
+              value: parseFloat(match[2]),
+            })
+          }
+        }
+      }
+
+      altPattern.lastIndex = 0
+
+      if (posSection && positiveBias.length === 0) {
+        let match
+        while ((match = altPattern.exec(posSection[1])) !== null) {
+          const name = match[1].trim()
+          if (name.length > 0 && name.length < 20 && !name.includes('乖離')) {
+            positiveBias.push({
+              name,
+              value: parseFloat(match[2]),
+            })
+          }
+        }
+      }
+    }
+
+    // Sort and take top 5
+    // Negative bias: sorted by value ascending (most negative first)
+    negativeBias.sort((a, b) => a.value - b.value)
+    const topNegative = negativeBias.slice(0, 5)
+
+    // Positive bias: sorted by value descending (most positive first)
+    positiveBias.sort((a, b) => b.value - a.value)
+    const topPositive = positiveBias.slice(0, 5)
+
+    if (topNegative.length === 0 && topPositive.length === 0) {
+      throw new Error('無法解析 FBI 排行資料，網頁結構可能已更改')
+    }
+
+    return {
+      label,
+      negativeBias: topNegative,
+      positiveBias: topPositive,
+      lastUpdated: new Date().toISOString(),
+      dataSource: 'fundhot.com',
+      dataDate: dataDate || undefined,
+    }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Unknown error'
+    return {
+      label,
+      negativeBias: [],
+      positiveBias: [],
+      error: `Error: 無法取得真實連線，需更換資料源 - ${msg}`,
+      lastUpdated: new Date().toISOString(),
+    }
+  }
+}
+
 // ── Main API Route ──
 export async function GET() {
   // Check cache first
@@ -733,7 +870,7 @@ export async function GET() {
   }
 
   // Fetch all indicators in parallel
-  const [vix, vvix, contango, fearGreed, aaii, cryptoFearGreed, canary] = await Promise.all([
+  const [vix, vvix, contango, fearGreed, aaii, cryptoFearGreed, canary, fbi] = await Promise.all([
     fetchVIX(),
     fetchVVIX(),
     fetchContango(),
@@ -741,6 +878,7 @@ export async function GET() {
     fetchAAII(),
     fetchCryptoFearGreed(),
     fetchCanaryRatio(),
+    fetchFBI(),
   ])
 
   const payload: SentimentPayload = {
@@ -751,6 +889,7 @@ export async function GET() {
     aaii,
     cryptoFearGreed,
     canary,
+    fbi,
     timestamp: new Date().toISOString(),
   }
 

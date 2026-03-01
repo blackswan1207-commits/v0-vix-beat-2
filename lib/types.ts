@@ -29,6 +29,21 @@ export interface CryptoFearGreedData extends IndicatorData {
   classification?: string
 }
 
+export interface FbiRankingItem {
+  name: string       // Chinese name e.g. "中國國企股"
+  value: number      // e.g. -3.42 (percentage)
+}
+
+export interface FbiData {
+  label: string
+  negativeBias: FbiRankingItem[]  // Top 5 negative bias
+  positiveBias: FbiRankingItem[]  // Top 5 positive bias
+  error?: string
+  lastUpdated: string
+  dataSource?: string
+  dataDate?: string  // Date shown on fundhot.com (e.g. "2026-02-20")
+}
+
 export interface CanaryData extends IndicatorData {
   vwoMomentum?: number | null
   bndMomentum?: number | null
@@ -55,5 +70,6 @@ export interface SentimentPayload {
   aaii: IndicatorData
   cryptoFearGreed: CryptoFearGreedData
   canary: CanaryData
+  fbi: FbiData
   timestamp: string
 }
