@@ -52,3 +52,14 @@ export function appendHistory(key: string, point: HistoricalPoint): HistoricalPo
 export function getHistory(key: string): HistoricalPoint[] {
   return historyStore.get(key) || []
 }
+
+/**
+ * Get count of accumulated history data points
+ */
+export function getHistoryCount(): number {
+  // Return the count from any indicator (they all accumulate at the same rate)
+  const keys = Array.from(historyStore.keys())
+  if (keys.length === 0) return 0
+  const firstHistory = historyStore.get(keys[0]) || []
+  return firstHistory.length
+}

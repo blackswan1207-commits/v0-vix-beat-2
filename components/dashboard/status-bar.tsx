@@ -7,9 +7,10 @@ interface StatusBarProps {
   isLoading: boolean
   onRefresh: () => void
   errorCount: number
+  dataPoints: number
 }
 
-export function StatusBar({ lastUpdated, isLoading, onRefresh, errorCount }: StatusBarProps) {
+export function StatusBar({ lastUpdated, isLoading, onRefresh, errorCount, dataPoints }: StatusBarProps) {
   const formattedTime = lastUpdated
     ? new Date(lastUpdated).toLocaleTimeString('en-US', {
         hour: '2-digit',
@@ -28,6 +29,9 @@ export function StatusBar({ lastUpdated, isLoading, onRefresh, errorCount }: Sta
         </span>
         <span className="text-terminal-dim">
           REFRESH: <span className="text-terminal-gold">2H INTERVAL</span>
+        </span>
+        <span className="text-terminal-dim">
+          SPARKLINE DATA: <span className={dataPoints >= 10 ? 'text-terminal-green' : 'text-terminal-gold'}>{dataPoints}/10</span>
         </span>
         {errorCount > 0 && (
           <span className="text-terminal-red">

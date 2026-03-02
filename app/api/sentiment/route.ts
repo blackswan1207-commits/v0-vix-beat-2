@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { getCached, setCache, appendHistory, getHistory } from '@/lib/cache'
+import { getCached, setCache, appendHistory, getHistory, getHistoryCount } from '@/lib/cache'
 import type {
   SentimentPayload,
   IndicatorData,
@@ -732,77 +732,42 @@ async function fetchFBI(): Promise<FbiData> {
     }
 
     // Parse the FBI ranking tables
-    // The page structure shows negative bias items followed by positive bias items
-    // Based on the page content, we look for the pattern: name followed by percentage
+    // Page format: [印尼] followed by -2.1% on next line
     const negativeBias: FbiRankingItem[] = []
     const positiveBias: FbiRankingItem[] = []
 
-    // The content shows items like: [印尼] -2.1%, [美國科技] -1.14%, etc.
-    // Let's find all FBI ranking items from the page text
     const pageText = $('body').text()
 
-    // Find the FBI section - look for patterns after "負乖離" and "正乖離"
-    const negSection = pageText.match(/負乖離([\s\S]*?)正乖離/)
-    const posSection = pageText.match(/正乖離([\s\S]*?)(?:債券FBI|匯率FBI|$)/)
+    // Find the FBI stock section - between "股票FBI排行" and "債券FBI排行"
+    const fbiSection = pageText.match(/股票FBI排行[\s\S]*?負乖離([\s\S]*?)債券FBI排行/)
+    
+    if (fbiSection) {
+      const sectionText = fbiSection[1]
+      
+      // Split by "正乖離" to get negative and positive sections
+      const parts = sectionText.split(/正乖離/)
+      const negText = parts[0] || ''
+      const posText = parts[1] || ''
 
-    // Pattern: Chinese name followed by percentage
-    const itemPattern = /\[([^\]]+)\]\s*(-?\d+\.?\d*)%/g
+      // Pattern: [Name] followed by percentage (with possible whitespace/newlines)
+      // Format is: [印尼] \n -2.1%
+      const itemPattern = /\[([^\]]+)\]\s*\n?\s*(-?\d+\.?\d*)%/g
 
-    if (negSection) {
       let match
-      while ((match = itemPattern.exec(negSection[1])) !== null) {
+      while ((match = itemPattern.exec(negText)) !== null) {
         negativeBias.push({
           name: match[1].trim(),
           value: parseFloat(match[2]),
         })
       }
-    }
 
-    // Reset regex lastIndex
-    itemPattern.lastIndex = 0
+      itemPattern.lastIndex = 0
 
-    if (posSection) {
-      let match
-      while ((match = itemPattern.exec(posSection[1])) !== null) {
+      while ((match = itemPattern.exec(posText)) !== null) {
         positiveBias.push({
           name: match[1].trim(),
           value: parseFloat(match[2]),
         })
-      }
-    }
-
-    // If the bracket pattern didn't work, try a different approach
-    // The page shows items as plain text like "印尼 -2.1%"
-    if (negativeBias.length === 0 || positiveBias.length === 0) {
-      // Alternative pattern without brackets
-      const altPattern = /([^\d\s\[\]%]+?)\s*(-?\d+\.?\d*)%/g
-
-      if (negSection && negativeBias.length === 0) {
-        let match
-        while ((match = altPattern.exec(negSection[1])) !== null) {
-          const name = match[1].trim()
-          if (name.length > 0 && name.length < 20 && !name.includes('乖離')) {
-            negativeBias.push({
-              name,
-              value: parseFloat(match[2]),
-            })
-          }
-        }
-      }
-
-      altPattern.lastIndex = 0
-
-      if (posSection && positiveBias.length === 0) {
-        let match
-        while ((match = altPattern.exec(posSection[1])) !== null) {
-          const name = match[1].trim()
-          if (name.length > 0 && name.length < 20 && !name.includes('乖離')) {
-            positiveBias.push({
-              name,
-              value: parseFloat(match[2]),
-            })
-          }
-        }
       }
     }
 
@@ -873,6 +838,7 @@ export async function GET() {
     canary,
     fbi,
     timestamp: new Date().toISOString(),
+    dataPoints: getHistoryCount(),
   }
 
   // Cache the result for 2 hours

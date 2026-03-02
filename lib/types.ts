@@ -72,4 +72,5 @@ export interface SentimentPayload {
   canary: CanaryData
   fbi: FbiData
   timestamp: string
+  dataPoints: number  // Number of accumulated data points (max 10)
 }

@@ -350,6 +350,7 @@ export function Dashboard() {
         isLoading={isValidating}
         onRefresh={() => mutate()}
         errorCount={errorCount}
+        dataPoints={data?.dataPoints ?? 0}
       />
     </div>
   )
