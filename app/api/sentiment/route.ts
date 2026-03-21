@@ -705,14 +705,77 @@ async function fetchCanaryRatio(): Promise<CanaryData> {
 }
 
 // ── FBI (Fund Bias Index) from fundhot.com ──
+// Parsing logic based on working reference implementation
+
+function parseFbiHtml(html: string): { date: string; negative: FbiRankingItem[]; positive: FbiRankingItem[] } {
+  const negative: FbiRankingItem[] = []
+  const positive: FbiRankingItem[] = []
+
+  // Date format: 2026-03-20淨值
+  const dateMatch = html.match(/(\d{4}-\d{2}-\d{2})\s*淨值/)
+  const date = dateMatch ? dateMatch[1] : new Date().toISOString().slice(0, 10)
+
+  // fundhot structure: 負乖離 section → 正乖離 section
+  // Item format: 中文名 · -X.XX% (using middle dot · as delimiter)
+  const negBlock = html.match(/負乖離([\s\S]*?)正乖離/)
+  const posBlock = html.match(/正乖離([\s\S]*?)(?:負乖離|$)/)
+
+  // Pattern: · Name · Percentage%
+  const re = /·\s*([\u4e00-\u9fff\u3000-\u303f\uff00-\uffef\w\s（）()]+?)\s*·\s*(-?[\d.]+)%/g
+
+  if (negBlock) {
+    let m
+    while ((m = re.exec(negBlock[1])) !== null) {
+      const val = parseFloat(m[2])
+      if (!isNaN(val)) negative.push({ name: m[1].trim(), value: val })
+    }
+  }
+
+  re.lastIndex = 0
+
+  if (posBlock) {
+    let m
+    while ((m = re.exec(posBlock[1])) !== null) {
+      const val = parseFloat(m[2])
+      if (!isNaN(val)) positive.push({ name: m[1].trim(), value: val })
+    }
+  }
+
+  // Fallback: if section-based parsing failed, scan entire HTML
+  if (negative.length === 0 && positive.length === 0) {
+    // Simple pattern: Chinese name (2-12 chars) · percentage
+    const reSimple = /([^\x00-\x7F]{2,12})\s*·\s*(-?[\d.]+)%/g
+    let m
+    while ((m = reSimple.exec(html)) !== null) {
+      const val = parseFloat(m[2])
+      if (!isNaN(val)) {
+        if (val < 0) negative.push({ name: m[1].trim(), value: val })
+        else positive.push({ name: m[1].trim(), value: val })
+      }
+    }
+  }
+
+  // Sort: negative by value ascending (most negative first), positive by value descending
+  negative.sort((a, b) => a.value - b.value)
+  positive.sort((a, b) => b.value - a.value)
+
+  return { date, negative, positive }
+}
+
 async function fetchFBI(): Promise<FbiData> {
   const label = 'FBI股票排行'
   try {
     const res = await fetch('https://fundhot.com/', {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
         'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Referer': 'https://www.google.com/',
+        'Cache-Control': 'no-cache',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'cross-site',
       },
       signal: AbortSignal.timeout(15000),
     })
@@ -720,68 +783,14 @@ async function fetchFBI(): Promise<FbiData> {
     if (!res.ok) throw new Error(`fundhot.com HTTP ${res.status}`)
 
     const html = await res.text()
-    const { load } = await import('cheerio')
-    const $ = load(html)
+    const { date, negative, positive } = parseFbiHtml(html)
 
-    // Find the date from the page - look for "股票FBI排行" section header with date
-    let dataDate = ''
-    const fbiHeaderText = $('body').text()
-    const dateMatch = fbiHeaderText.match(/股票FBI排行\s*(\d{4}-\d{2}-\d{2})/)
-    if (dateMatch) {
-      dataDate = dateMatch[1]
-    }
-
-    // Parse the FBI ranking tables
-    // Page format: [印尼] followed by -2.1% on next line
-    const negativeBias: FbiRankingItem[] = []
-    const positiveBias: FbiRankingItem[] = []
-
-    const pageText = $('body').text()
-
-    // Find the FBI stock section - between "股票FBI排行" and "債券FBI排行"
-    const fbiSection = pageText.match(/股票FBI排行[\s\S]*?負乖離([\s\S]*?)債券FBI排行/)
-    
-    if (fbiSection) {
-      const sectionText = fbiSection[1]
-      
-      // Split by "正乖離" to get negative and positive sections
-      const parts = sectionText.split(/正乖離/)
-      const negText = parts[0] || ''
-      const posText = parts[1] || ''
-
-      // Pattern: [Name] followed by percentage (with possible whitespace/newlines)
-      // Format is: [印尼] \n -2.1%
-      const itemPattern = /\[([^\]]+)\]\s*\n?\s*(-?\d+\.?\d*)%/g
-
-      let match
-      while ((match = itemPattern.exec(negText)) !== null) {
-        negativeBias.push({
-          name: match[1].trim(),
-          value: parseFloat(match[2]),
-        })
-      }
-
-      itemPattern.lastIndex = 0
-
-      while ((match = itemPattern.exec(posText)) !== null) {
-        positiveBias.push({
-          name: match[1].trim(),
-          value: parseFloat(match[2]),
-        })
-      }
-    }
-
-    // Sort and take top 5
-    // Negative bias: sorted by value ascending (most negative first)
-    negativeBias.sort((a, b) => a.value - b.value)
-    const topNegative = negativeBias.slice(0, 5)
-
-    // Positive bias: sorted by value descending (most positive first)
-    positiveBias.sort((a, b) => b.value - a.value)
-    const topPositive = positiveBias.slice(0, 5)
+    // Take top 5 for each
+    const topNegative = negative.slice(0, 5)
+    const topPositive = positive.slice(0, 5)
 
     if (topNegative.length === 0 && topPositive.length === 0) {
-      throw new Error('無法解析 FBI 排行資料，網頁結構可能已更改')
+      throw new Error(`無法解析 FBI 排行資料 (HTML長度: ${html.length})`)
     }
 
     return {
@@ -790,7 +799,7 @@ async function fetchFBI(): Promise<FbiData> {
       positiveBias: topPositive,
       lastUpdated: new Date().toISOString(),
       dataSource: 'fundhot.com',
-      dataDate: dataDate || undefined,
+      dataDate: date,
     }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Unknown error'
