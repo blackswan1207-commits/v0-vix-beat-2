@@ -720,6 +720,7 @@ async function fetchFBI(): Promise<FbiData> {
   const FBI_JSON_URL = 'https://gist.githubusercontent.com/raw/29339fe5131d3f17e2747be0d81426de/fbi_ranking.json'
 
   try {
+    console.log('[v0] fetchFBI: Starting fetch from', FBI_JSON_URL)
     const res = await fetch(FBI_JSON_URL, {
       headers: {
         'Accept': 'application/json',
@@ -728,9 +729,11 @@ async function fetchFBI(): Promise<FbiData> {
       signal: AbortSignal.timeout(10000),
     })
 
+    console.log('[v0] fetchFBI: Response status', res.status)
     if (!res.ok) throw new Error(`GitHub Gist HTTP ${res.status}`)
 
     const json: FbiJsonResponse = await res.json()
+    console.log('[v0] fetchFBI: JSON received', JSON.stringify(json).slice(0, 200))
 
     // buy_zone = 負乖離 (negative bias), deviation values are negative
     // strength_zone = 正乖離 (positive bias), deviation values are positive
@@ -747,6 +750,9 @@ async function fetchFBI(): Promise<FbiData> {
         name: item.name,
         value: Math.abs(item.deviation), // Ensure positive
       }))
+
+    console.log('[v0] fetchFBI: Parsed negativeBias', negativeBias.length, 'items:', negativeBias.slice(0, 2))
+    console.log('[v0] fetchFBI: Parsed positiveBias', positiveBias.length, 'items:', positiveBias.slice(0, 2))
 
     if (negativeBias.length === 0 && positiveBias.length === 0) {
       throw new Error('JSON 資料為空')
