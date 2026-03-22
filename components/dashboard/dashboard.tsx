@@ -40,11 +40,6 @@ export function Dashboard() {
     }
   )
 
-  // Debug FBI data
-  if (data?.fbi) {
-    console.log('[v0] Dashboard FBI data:', data.fbi)
-  }
-
   const errorCount = data
     ? [data.vix, data.vvix, data.contango, data.fearGreed, data.aaii, data.cryptoFearGreed, data.canary, data.fbi].filter(
         (d) => d.error
