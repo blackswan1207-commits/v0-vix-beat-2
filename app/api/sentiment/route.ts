@@ -704,102 +704,61 @@ async function fetchCanaryRatio(): Promise<CanaryData> {
   }
 }
 
-// ── FBI (Fund Bias Index) from fundhot.com ──
-// Parsing logic based on working reference implementation
+// ── FBI (Fund Bias Index) from GitHub Gist JSON ──
+// Data source: Pre-parsed FBI ranking from fundhot.com
 
-function parseFbiHtml(html: string): { date: string; negative: FbiRankingItem[]; positive: FbiRankingItem[] } {
-  const negative: FbiRankingItem[] = []
-  const positive: FbiRankingItem[] = []
-
-  // Date format: 2026-03-20淨值
-  const dateMatch = html.match(/(\d{4}-\d{2}-\d{2})\s*淨值/)
-  const date = dateMatch ? dateMatch[1] : new Date().toISOString().slice(0, 10)
-
-  // fundhot structure: 負乖離 section → 正乖離 section
-  // Item format: 中文名 · -X.XX% (using middle dot · as delimiter)
-  const negBlock = html.match(/負乖離([\s\S]*?)正乖離/)
-  const posBlock = html.match(/正乖離([\s\S]*?)(?:負乖離|$)/)
-
-  // Pattern: · Name · Percentage%
-  const re = /·\s*([\u4e00-\u9fff\u3000-\u303f\uff00-\uffef\w\s（）()]+?)\s*·\s*(-?[\d.]+)%/g
-
-  if (negBlock) {
-    let m
-    while ((m = re.exec(negBlock[1])) !== null) {
-      const val = parseFloat(m[2])
-      if (!isNaN(val)) negative.push({ name: m[1].trim(), value: val })
-    }
-  }
-
-  re.lastIndex = 0
-
-  if (posBlock) {
-    let m
-    while ((m = re.exec(posBlock[1])) !== null) {
-      const val = parseFloat(m[2])
-      if (!isNaN(val)) positive.push({ name: m[1].trim(), value: val })
-    }
-  }
-
-  // Fallback: if section-based parsing failed, scan entire HTML
-  if (negative.length === 0 && positive.length === 0) {
-    // Simple pattern: Chinese name (2-12 chars) · percentage
-    const reSimple = /([^\x00-\x7F]{2,12})\s*·\s*(-?[\d.]+)%/g
-    let m
-    while ((m = reSimple.exec(html)) !== null) {
-      const val = parseFloat(m[2])
-      if (!isNaN(val)) {
-        if (val < 0) negative.push({ name: m[1].trim(), value: val })
-        else positive.push({ name: m[1].trim(), value: val })
-      }
-    }
-  }
-
-  // Sort: negative by value ascending (most negative first), positive by value descending
-  negative.sort((a, b) => a.value - b.value)
-  positive.sort((a, b) => b.value - a.value)
-
-  return { date, negative, positive }
+interface FbiJsonResponse {
+  date: string
+  updated_at: string
+  source: string
+  buy_zone: Array<{ rank: number; name: string; deviation: number }>      // 負乖離 (買進區)
+  strength_zone: Array<{ rank: number; name: string; deviation: number }> // 正乖離 (強勢區)
 }
 
 async function fetchFBI(): Promise<FbiData> {
   const label = 'FBI股票排行'
+  const FBI_JSON_URL = 'https://gist.githubusercontent.com/raw/29339fe5131d3f17e2747be0d81426de/fbi_ranking.json'
+
   try {
-    const res = await fetch('https://fundhot.com/', {
+    const res = await fetch(FBI_JSON_URL, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-        'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Referer': 'https://www.google.com/',
-        'Cache-Control': 'no-cache',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'cross-site',
+        'Accept': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
       },
-      signal: AbortSignal.timeout(15000),
+      signal: AbortSignal.timeout(10000),
     })
 
-    if (!res.ok) throw new Error(`fundhot.com HTTP ${res.status}`)
+    if (!res.ok) throw new Error(`GitHub Gist HTTP ${res.status}`)
 
-    const html = await res.text()
-    const { date, negative, positive } = parseFbiHtml(html)
+    const json: FbiJsonResponse = await res.json()
 
-    // Take top 5 for each
-    const topNegative = negative.slice(0, 5)
-    const topPositive = positive.slice(0, 5)
+    // buy_zone = 負乖離 (negative bias), deviation values are negative
+    // strength_zone = 正乖離 (positive bias), deviation values are positive
+    const negativeBias: FbiRankingItem[] = json.buy_zone
+      .slice(0, 5)
+      .map(item => ({
+        name: item.name,
+        value: item.deviation < 0 ? item.deviation : -item.deviation, // Ensure negative
+      }))
 
-    if (topNegative.length === 0 && topPositive.length === 0) {
-      throw new Error(`無法解析 FBI 排行資料 (HTML長度: ${html.length})`)
+    const positiveBias: FbiRankingItem[] = json.strength_zone
+      .slice(0, 5)
+      .map(item => ({
+        name: item.name,
+        value: Math.abs(item.deviation), // Ensure positive
+      }))
+
+    if (negativeBias.length === 0 && positiveBias.length === 0) {
+      throw new Error('JSON 資料為空')
     }
 
     return {
       label,
-      negativeBias: topNegative,
-      positiveBias: topPositive,
+      negativeBias,
+      positiveBias,
       lastUpdated: new Date().toISOString(),
-      dataSource: 'fundhot.com',
-      dataDate: date,
+      dataSource: json.source || 'fundhot.com',
+      dataDate: json.date,
     }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Unknown error'
@@ -807,7 +766,7 @@ async function fetchFBI(): Promise<FbiData> {
       label,
       negativeBias: [],
       positiveBias: [],
-      error: `Error: 無法取得真實連線，需更換資料源 - ${msg}`,
+      error: `Error: 無法取得真實連線 - ${msg}`,
       lastUpdated: new Date().toISOString(),
     }
   }
