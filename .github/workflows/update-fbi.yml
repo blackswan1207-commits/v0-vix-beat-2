@@ -1,0 +1,22 @@
+name: Update FBI Rankings
+
+on:
+  schedule:
+    - cron: '0 1,7,13 * * 1-5'   # 台灣時間 週一到五 09:00, 15:00, 21:00
+  workflow_dispatch:               # 支援手動觸發
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Fetch FBI data and update Gist
+        env:
+          GIST_ID: ${{ secrets.GIST_ID }}
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+        run: node .github/scripts/fetch-fbi.mjs

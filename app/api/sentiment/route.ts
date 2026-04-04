@@ -791,7 +791,7 @@ async function fetchFbiFromFundhot(): Promise<{ negative: FbiRankingItem[]; posi
 
 async function fetchFBI(): Promise<FbiData> {
   const label = 'FBI股票排行'
-  const FBI_JSON_URL = 'https://gist.githubusercontent.com/raw/29339fe5131d3f17e2747be0d81426de/fbi_ranking.json'
+  const FBI_JSON_URL = 'https://gist.githubusercontent.com/blackswan1207-6478/GIST_ID/raw/fbi_ranking.json'
 
   try {
     // === Primary: GitHub Gist JSON ===
