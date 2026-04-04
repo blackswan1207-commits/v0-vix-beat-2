@@ -735,47 +735,54 @@ async function fetchFbiFromFundhot(): Promise<{ negative: FbiRankingItem[]; posi
       },
       signal: AbortSignal.timeout(15000),
     })
-
     if (!res.ok) return null
-
     const html = await res.text()
+
     const negative: FbiRankingItem[] = []
     const positive: FbiRankingItem[] = []
 
-    // Date format: 2026-03-20淨值
-    const dateMatch = html.match(/(\d{4}-\d{2}-\d{2})\s*淨值/)
+    // 先把 HTML tag 全部剝掉，變成純文字再做 regex
+    const plainText = html.replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ')
+
+    // Date format: 2026-04-02淨值
+    const dateMatch = plainText.match(/(\d{4}-\d{2}-\d{2})\s*淨值/)
     const date = dateMatch ? dateMatch[1] : new Date().toISOString().slice(0, 10)
 
-    // Pattern: 中文名 · -X.XX% (using middle dot · as delimiter)
-    const negBlock = html.match(/負乖離([\s\S]*?)正乖離/)
-    const posBlock = html.match(/正乖離([\s\S]*?)(?:負乖離|債券FBI|$)/)
+    // 切出負乖離和正乖離的文字區塊
+    const negBlock = plainText.match(/負乖離([\s\S]*?)正乖離/)
+    const posBlock = plainText.match(/正乖離([\s\S]*?)(?:債券FBI|匯率FBI|查看完整排行|$)/)
 
-    const re = /·\s*([\u4e00-\u9fff\u3000-\u303f\uff00-\uffef\w\s（）()]+?)\s*·\s*(-?[\d.]+)%/g
+    // 修正後的 regex：中文開頭，後面接非數字非%的字元（非貪婪），再接有號數字%
+    const re = /([\u4e00-\u9fff][^\d%]*?)(-?\d+\.?\d*)%/g
 
     if (negBlock) {
+      re.lastIndex = 0
       let m
       while ((m = re.exec(negBlock[1])) !== null) {
+        const name = m[1].trim()
         const val = parseFloat(m[2])
-        if (!isNaN(val)) negative.push({ name: m[1].trim(), value: val < 0 ? val : -val })
+        if (!isNaN(val) && name.length >= 2) {
+          negative.push({ name, value: val < 0 ? val : -val })
+        }
       }
     }
 
     re.lastIndex = 0
-
     if (posBlock) {
       let m
       while ((m = re.exec(posBlock[1])) !== null) {
+        const name = m[1].trim()
         const val = parseFloat(m[2])
-        if (!isNaN(val)) positive.push({ name: m[1].trim(), value: Math.abs(val) })
+        if (!isNaN(val) && name.length >= 2) {
+          positive.push({ name, value: Math.abs(val) })
+        }
       }
     }
 
-    // Sort
     negative.sort((a, b) => a.value - b.value)
     positive.sort((a, b) => b.value - a.value)
 
     if (negative.length === 0 && positive.length === 0) return null
-
     return { negative: negative.slice(0, 5), positive: positive.slice(0, 5), date }
   } catch {
     return null
