@@ -1,9 +1,7 @@
 name: Update FBI Rankings
 
 on:
-  schedule:
-    - cron: '0 1,7,13 * * 1-5'   # 台灣時間 週一到五 09:00, 15:00, 21:00
-  workflow_dispatch:               # 支援手動觸發
+  workflow_dispatch:               # 僅支援手動觸發（本機 launchd 負責排程）
 
 jobs:
   update:
