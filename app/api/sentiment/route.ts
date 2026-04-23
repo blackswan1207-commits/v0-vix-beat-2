@@ -9,6 +9,9 @@ import type {
   CanaryData,
   FbiData,
   FbiRankingItem,
+  CycleData,
+  CycleStage,
+  FedPolicy,
 } from '@/lib/types'
 
 const CACHE_KEY = 'sentiment-data'
@@ -867,6 +870,212 @@ async function fetchFBI(): Promise<FbiData> {
   }
 }
 
+// ── Cycle Model (富邦景氣循環): OECD CLI + Yield Spread + Fed Assets ──
+
+function parseFredCsv(text: string): Array<{ date: string; value: number }> {
+  const lines = text.trim().split('\n')
+  const result: Array<{ date: string; value: number }> = []
+  for (let i = 1; i < lines.length; i++) {
+    const parts = lines[i].split(',')
+    if (parts.length < 2) continue
+    const date = parts[0].trim()
+    const val = parts[1].trim()
+    if (!date || val === '.' || val === '' || isNaN(Number(val))) continue
+    result.push({ date, value: Number(val) })
+  }
+  return result
+}
+
+function mean(arr: number[]): number {
+  return arr.reduce((a, b) => a + b, 0) / arr.length
+}
+
+function stdDev(arr: number[], avg: number): number {
+  const variance = arr.reduce((a, b) => a + (b - avg) ** 2, 0) / arr.length
+  return Math.sqrt(variance)
+}
+
+function classifyOecdCli(level: number, direction: 'rising' | 'falling'): CycleStage {
+  if (level >= 100 && direction === 'rising') return 'Expansion'
+  if (level >= 100 && direction === 'falling') return 'Retracement'
+  if (level < 100 && direction === 'falling') return 'Recession'
+  return 'Recovery'
+}
+
+function classifyYieldSpread(spread: number, avg: number, std: number): CycleStage {
+  if (spread >= 0) {
+    return spread >= avg ? 'Expansion' : 'Retracement'
+  } else {
+    return spread < avg - std ? 'Recession' : 'Recovery'
+  }
+}
+
+function combineStages(cliStage: CycleStage, yieldStage: CycleStage): CycleStage {
+  const growthStages: CycleStage[] = ['Expansion', 'Recovery']
+  const slowdownStages: CycleStage[] = ['Retracement', 'Recession']
+  const cliGrowth = growthStages.includes(cliStage)
+  const yieldGrowth = growthStages.includes(yieldStage)
+  if (cliGrowth && yieldGrowth) return cliStage
+  if (!cliGrowth && !yieldGrowth) return yieldStage
+  return cliStage  // conflict → CLI wins
+}
+
+function applyFedPolicy(stage: CycleStage, policy: FedPolicy): CycleStage {
+  if (policy === 'QE') {
+    if (stage === 'Retracement') return 'Expansion'
+    if (stage === 'Recession') return 'Recovery'
+  }
+  if (policy === 'QT') {
+    if (stage === 'Recovery') return 'Retracement'
+  }
+  return stage
+}
+
+async function fetchCycleModel(): Promise<CycleData> {
+  const label = '景氣循環模型'
+  const now = new Date()
+  const tenYearsAgo = new Date(now)
+  tenYearsAgo.setFullYear(now.getFullYear() - 10)
+  const tenYearsAgoStr = tenYearsAgo.toISOString().slice(0, 10)
+  const sixMonthsAgoStr = new Date(now.getTime() - 180 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
+
+  try {
+    // Fetch all three data sources in parallel
+    // T10Y3M: start from 10 years ago for historical avg; WALCL: ~6 months for quarterly change
+    const FRED_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+    const [oecdRes, spreadRes, walclRes] = await Promise.all([
+      fetch(
+        'https://stats.oecd.org/SDMX-JSON/data/MEI_CLI/LOLITOAA.OAVG.M/all?lastNObservations=6',
+        { headers: { Accept: 'application/json', 'User-Agent': FRED_UA }, signal: AbortSignal.timeout(20000) }
+      ),
+      fetch(
+        `https://fred.stlouisfed.org/graph/fredgraph.csv?id=T10Y3M&observation_start=${tenYearsAgoStr}`,
+        { headers: { 'User-Agent': FRED_UA }, signal: AbortSignal.timeout(30000) }
+      ),
+      fetch(
+        `https://fred.stlouisfed.org/graph/fredgraph.csv?id=WALCL&observation_start=${sixMonthsAgoStr}`,
+        { headers: { 'User-Agent': FRED_UA }, signal: AbortSignal.timeout(20000) }
+      ),
+    ])
+
+    // ── OECD CLI (G7 Amplitude-Adjusted, series key 13:0:1:0:1:1:0:0:0) ──
+    let oecdCli: number | null = null
+    let oecdCliDirection: 'rising' | 'falling' | null = null
+    let oecdCliStage: CycleStage | null = null
+
+    if (oecdRes.ok) {
+      try {
+        const json = await oecdRes.json()
+        // New OECD SDMX-JSON structure: data.structures[0].dimensions.observation[0].values
+        const structs = json?.data?.structures?.[0]
+        const timeDimValues = structs?.dimensions?.observation?.[0]?.values as Array<{ id: string }> | undefined
+        const idxToDate: Record<number, string> = {}
+        if (timeDimValues) {
+          timeDimValues.forEach((v, i) => { idxToDate[i] = v.id })
+        }
+        // NAFTA (USA+Canada+Mexico) amplitude-adjusted CLI — correct LI series with latest data
+        // (OECD Total/OAVG not available in this endpoint; NAFTA is best available world proxy)
+        const G7_AA_KEY = '51:0:0:0:1:1:0:0:0'
+        const seriesObs = json?.data?.dataSets?.[0]?.series?.[G7_AA_KEY]?.observations as Record<string, [number, number]> | undefined
+        if (seriesObs && Object.keys(idxToDate).length > 0) {
+          const entries = Object.entries(seriesObs)
+            .map(([idx, arr]) => ({ date: idxToDate[Number(idx)] ?? '', value: arr[0] }))
+            .filter(e => e.date && e.value != null && !isNaN(e.value))
+            .sort((a, b) => a.date.localeCompare(b.date))
+          if (entries.length >= 2) {
+            const last = entries[entries.length - 1]
+            const prev = entries[entries.length - 2]
+            oecdCli = last.value
+            oecdCliDirection = last.value > prev.value ? 'rising' : 'falling'
+            oecdCliStage = classifyOecdCli(oecdCli, oecdCliDirection)
+          }
+        }
+      } catch { /* parse error, continue */ }
+    }
+
+    // ── Yield Spread (T10Y3M) ──
+    let yieldSpread: number | null = null
+    let yieldSpreadAvg: number | null = null
+    let yieldSpreadStd: number | null = null
+    let yieldSpreadStage: CycleStage | null = null
+
+    if (spreadRes.ok) {
+      const spreadText = await spreadRes.text()
+      const spreadData = parseFredCsv(spreadText).filter(d => !isNaN(d.value))
+      if (spreadData.length >= 12) {
+        const values = spreadData.map(d => d.value)
+        const avg = mean(values)
+        const std = stdDev(values, avg)
+        yieldSpread = values[values.length - 1]
+        yieldSpreadAvg = avg
+        yieldSpreadStd = std
+        yieldSpreadStage = classifyYieldSpread(yieldSpread, avg, std)
+      }
+    }
+
+    // ── Fed Total Assets (WALCL) ──
+    let fedAssetsChangeQoQ: number | null = null
+    let fedPolicy: FedPolicy | null = null
+
+    if (walclRes.ok) {
+      const walclText = await walclRes.text()
+      const walclData = parseFredCsv(walclText).filter(d => !isNaN(d.value))
+      if (walclData.length >= 14) {
+        // Weekly data: ~13 weeks = 1 quarter
+        const latest = walclData[walclData.length - 1].value
+        const quarterAgo = walclData[walclData.length - 14].value
+        fedAssetsChangeQoQ = ((latest - quarterAgo) / quarterAgo) * 100
+        if (fedAssetsChangeQoQ >= 3) fedPolicy = 'QE'
+        else if (fedAssetsChangeQoQ < -1) fedPolicy = 'QT'
+        else fedPolicy = 'QN'
+      }
+    }
+
+    // ── Combine stages ──
+    let designatedStage: CycleStage | null = null
+    let finalStage: CycleStage | null = null
+
+    if (oecdCliStage && yieldSpreadStage) {
+      designatedStage = combineStages(oecdCliStage, yieldSpreadStage)
+      finalStage = fedPolicy ? applyFedPolicy(designatedStage, fedPolicy) : designatedStage
+    } else if (oecdCliStage) {
+      designatedStage = oecdCliStage
+      finalStage = fedPolicy ? applyFedPolicy(designatedStage, fedPolicy) : designatedStage
+    } else if (yieldSpreadStage) {
+      designatedStage = yieldSpreadStage
+      finalStage = fedPolicy ? applyFedPolicy(designatedStage, fedPolicy) : designatedStage
+    }
+
+    return {
+      label,
+      oecdCli,
+      oecdCliDirection,
+      oecdCliStage,
+      yieldSpread,
+      yieldSpreadAvg,
+      yieldSpreadStd,
+      yieldSpreadStage,
+      fedAssetsChangeQoQ,
+      fedPolicy,
+      designatedStage,
+      finalStage,
+      lastUpdated: new Date().toISOString(),
+      dataSource: 'OECD / FRED',
+    }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Unknown error'
+    return {
+      label,
+      oecdCli: null, oecdCliDirection: null, oecdCliStage: null,
+      yieldSpread: null, yieldSpreadAvg: null, yieldSpreadStd: null, yieldSpreadStage: null,
+      fedAssetsChangeQoQ: null, fedPolicy: null,
+      designatedStage: null, finalStage: null,
+      error: `Error: 無法取得景氣循環資料 - ${msg}`,
+      lastUpdated: new Date().toISOString(),
+    }
+  }
+}
+
 // ── Main API Route ──
 export async function GET() {
   // Check cache first
@@ -880,7 +1089,7 @@ export async function GET() {
   }
 
   // Fetch all indicators in parallel
-  const [vix, vvix, contango, fearGreed, aaii, cryptoFearGreed, canary, fbi] = await Promise.all([
+  const [vix, vvix, contango, fearGreed, aaii, cryptoFearGreed, canary, fbi, cycle] = await Promise.all([
     fetchVIX(),
     fetchVVIX(),
     fetchContango(),
@@ -889,6 +1098,7 @@ export async function GET() {
     fetchCryptoFearGreed(),
     fetchCanaryRatio(),
     fetchFBI(),
+    fetchCycleModel(),
   ])
 
   const payload: SentimentPayload = {
@@ -900,6 +1110,7 @@ export async function GET() {
     cryptoFearGreed,
     canary,
     fbi,
+    cycle,
     timestamp: new Date().toISOString(),
     dataPoints: getHistoryCount(),
   }

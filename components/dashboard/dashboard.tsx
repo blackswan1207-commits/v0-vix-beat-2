@@ -9,6 +9,7 @@ import { FearGreedGauge } from './fear-greed-gauge'
 import { ContangoDetail } from './contango-detail'
 import { CanaryDetail } from './canary-detail'
 import { FbiPanel } from './fbi-panel'
+import { CyclePanel } from './cycle-panel'
 import { StatusBar } from './status-bar'
 import { Activity, AlertTriangle, RefreshCw } from 'lucide-react'
 
@@ -41,7 +42,7 @@ export function Dashboard() {
   )
 
   const errorCount = data
-    ? [data.vix, data.vvix, data.contango, data.fearGreed, data.aaii, data.cryptoFearGreed, data.canary, data.fbi].filter(
+    ? [data.vix, data.vvix, data.contango, data.fearGreed, data.aaii, data.cryptoFearGreed, data.canary, data.fbi, data.cycle].filter(
         (d) => d.error
       ).length
     : 0
@@ -342,6 +343,9 @@ export function Dashboard() {
 
         {/* FBI Stock Ranking Panel */}
         <FbiPanel data={data?.fbi} />
+
+        {/* Cycle Model Panel */}
+        <CyclePanel data={data?.cycle} />
       </main>
 
       {/* Bottom Status Bar */}

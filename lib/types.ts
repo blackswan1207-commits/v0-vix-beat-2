@@ -62,6 +62,31 @@ export interface CanaryData extends IndicatorData {
   }
 }
 
+export type CycleStage = 'Expansion' | 'Retracement' | 'Recession' | 'Recovery'
+export type FedPolicy = 'QE' | 'QN' | 'QT'
+
+export interface CycleData {
+  label: string
+  // OECD CLI
+  oecdCli: number | null
+  oecdCliDirection: 'rising' | 'falling' | null
+  oecdCliStage: CycleStage | null
+  // US Yield Spread (T10Y3M)
+  yieldSpread: number | null
+  yieldSpreadAvg: number | null
+  yieldSpreadStd: number | null
+  yieldSpreadStage: CycleStage | null
+  // Fed Assets
+  fedAssetsChangeQoQ: number | null
+  fedPolicy: FedPolicy | null
+  // Combined results
+  designatedStage: CycleStage | null
+  finalStage: CycleStage | null
+  error?: string
+  lastUpdated: string
+  dataSource?: string
+}
+
 export interface SentimentPayload {
   vix: IndicatorData
   vvix: IndicatorData
@@ -71,6 +96,7 @@ export interface SentimentPayload {
   cryptoFearGreed: CryptoFearGreedData
   canary: CanaryData
   fbi: FbiData
+  cycle: CycleData
   timestamp: string
   dataPoints: number  // Number of accumulated data points (max 10)
 }
