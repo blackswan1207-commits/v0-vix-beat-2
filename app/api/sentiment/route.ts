@@ -1,3 +1,5 @@
+export const maxDuration = 60
+
 import { NextResponse } from 'next/server'
 import { getCached, setCache, appendHistory, getHistory, getHistoryCount } from '@/lib/cache'
 import type {
@@ -942,9 +944,8 @@ async function fetchCycleModel(): Promise<CycleData> {
   const FRED_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
 
   try {
-    // T10Y3M: FRED API with monthly aggregation (120 rows vs 2500 daily) for full 10-year window
-    // WALCL: graph CSV, only 6 months needed — small payload
-    const [oecdRes, spreadRes, walclRes] = await Promise.all([
+    // Use allSettled so one slow/failing source doesn't block the other two
+    const [oecdResult, spreadResult, walclResult] = await Promise.allSettled([
       fetch(
         'https://stats.oecd.org/SDMX-JSON/data/MEI_CLI/LOLITOAA.OAVG.M/all?lastNObservations=6',
         { headers: { Accept: 'application/json', 'User-Agent': FRED_UA }, signal: AbortSignal.timeout(20000) }
@@ -958,13 +959,16 @@ async function fetchCycleModel(): Promise<CycleData> {
         { headers: { 'User-Agent': FRED_UA }, signal: AbortSignal.timeout(20000) }
       ),
     ])
+    const oecdRes = oecdResult.status === 'fulfilled' ? oecdResult.value : null
+    const spreadRes = spreadResult.status === 'fulfilled' ? spreadResult.value : null
+    const walclRes = walclResult.status === 'fulfilled' ? walclResult.value : null
 
     // ── OECD CLI (G7 Amplitude-Adjusted, series key 13:0:1:0:1:1:0:0:0) ──
     let oecdCli: number | null = null
     let oecdCliDirection: 'rising' | 'falling' | null = null
     let oecdCliStage: CycleStage | null = null
 
-    if (oecdRes.ok) {
+    if (oecdRes?.ok) {
       try {
         const json = await oecdRes.json()
         // New OECD SDMX-JSON structure: data.structures[0].dimensions.observation[0].values
@@ -1000,7 +1004,7 @@ async function fetchCycleModel(): Promise<CycleData> {
     let yieldSpreadStd: number | null = null
     let yieldSpreadStage: CycleStage | null = null
 
-    if (spreadRes.ok) {
+    if (spreadRes?.ok) {
       try {
         const spreadJson = await spreadRes.json()
         const spreadData: Array<{ date: string; value: number }> = (spreadJson?.observations ?? [])
@@ -1022,7 +1026,7 @@ async function fetchCycleModel(): Promise<CycleData> {
     let fedAssetsChangeQoQ: number | null = null
     let fedPolicy: FedPolicy | null = null
 
-    if (walclRes.ok) {
+    if (walclRes?.ok) {
       const walclText = await walclRes.text()
       const walclData = parseFredCsv(walclText).filter(d => !isNaN(d.value))
       if (walclData.length >= 14) {
