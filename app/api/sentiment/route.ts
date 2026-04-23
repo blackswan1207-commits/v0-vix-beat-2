@@ -934,9 +934,9 @@ function applyFedPolicy(stage: CycleStage, policy: FedPolicy): CycleStage {
 async function fetchCycleModel(): Promise<CycleData> {
   const label = '景氣循環模型'
   const now = new Date()
-  const tenYearsAgo = new Date(now)
-  tenYearsAgo.setFullYear(now.getFullYear() - 10)
-  const tenYearsAgoStr = tenYearsAgo.toISOString().slice(0, 10)
+  const fiveYearsAgo = new Date(now)
+  fiveYearsAgo.setFullYear(now.getFullYear() - 5)
+  const tenYearsAgoStr = fiveYearsAgo.toISOString().slice(0, 10)
   const sixMonthsAgoStr = new Date(now.getTime() - 180 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
 
   try {
@@ -950,7 +950,7 @@ async function fetchCycleModel(): Promise<CycleData> {
       ),
       fetch(
         `https://fred.stlouisfed.org/graph/fredgraph.csv?id=T10Y3M&observation_start=${tenYearsAgoStr}`,
-        { headers: { 'User-Agent': FRED_UA }, signal: AbortSignal.timeout(30000) }
+        { headers: { 'User-Agent': FRED_UA }, signal: AbortSignal.timeout(25000) }
       ),
       fetch(
         `https://fred.stlouisfed.org/graph/fredgraph.csv?id=WALCL&observation_start=${sixMonthsAgoStr}`,
