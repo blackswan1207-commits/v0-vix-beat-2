@@ -1075,7 +1075,7 @@ async function fetchCycleModel(): Promise<CycleData> {
       designatedStage,
       finalStage,
       lastUpdated: new Date().toISOString(),
-      dataSource: 'OECD / FRED',
+      dataSource: `OECD:${oecdResult.status}/${oecdRes?.status} FRED:${spreadResult.status}/${spreadRes?.status} WALCL:${walclResult.status}/${walclRes?.status} key:${FRED_API_KEY?.length}`,
     }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Unknown error'
