@@ -962,23 +962,25 @@ async function fetchCycleModel(): Promise<CycleData> {
     const oecdRes = oecdResult.status === 'fulfilled' ? oecdResult.value : null
     const spreadRes = spreadResult.status === 'fulfilled' ? spreadResult.value : null
     const walclRes = walclResult.status === 'fulfilled' ? walclResult.value : null
-    console.log('[cycle] fetch results:',
-      'oecd=', oecdResult.status, oecdRes?.status,
-      'spread=', spreadResult.status, spreadRes?.status,
-      'walcl=', walclResult.status, walclRes?.status,
-      'key_len=', FRED_API_KEY?.length
-    )
+    const oecdBody = oecdRes?.ok ? (await oecdRes.text().catch(() => 'read-error')) : 'not-ok'
+    const spreadBody = spreadRes?.ok ? (await spreadRes.text().catch(() => 'read-error')) : 'not-ok'
+    console.log('[cycle] oecd_body:', oecdBody.slice(0, 120))
+    console.log('[cycle] spread_body:', spreadBody.slice(0, 120))
+    // Re-parse from saved text
+    let oecdJson: unknown, spreadJson: unknown
+    try { oecdJson = JSON.parse(oecdBody) } catch { oecdJson = null }
+    try { spreadJson = JSON.parse(spreadBody) } catch { spreadJson = null }
 
     // ── OECD CLI (G7 Amplitude-Adjusted, series key 13:0:1:0:1:1:0:0:0) ──
     let oecdCli: number | null = null
     let oecdCliDirection: 'rising' | 'falling' | null = null
     let oecdCliStage: CycleStage | null = null
 
-    if (oecdRes?.ok) {
+    if (oecdRes?.ok && oecdJson) {
       try {
-        const json = await oecdRes.json()
+        const json = oecdJson as Record<string, unknown>
         // New OECD SDMX-JSON structure: data.structures[0].dimensions.observation[0].values
-        const structs = json?.data?.structures?.[0]
+        const structs = (json?.data as Record<string, unknown>)?.structures?.[0]
         const timeDimValues = structs?.dimensions?.observation?.[0]?.values as Array<{ id: string }> | undefined
         const idxToDate: Record<number, string> = {}
         if (timeDimValues) {
@@ -1010,9 +1012,8 @@ async function fetchCycleModel(): Promise<CycleData> {
     let yieldSpreadStd: number | null = null
     let yieldSpreadStage: CycleStage | null = null
 
-    if (spreadRes?.ok) {
+    if (spreadRes?.ok && spreadJson) {
       try {
-        const spreadJson = await spreadRes.json()
         const spreadData: Array<{ date: string; value: number }> = (spreadJson?.observations ?? [])
           .filter((o: { value: string }) => o.value !== '.' && !isNaN(parseFloat(o.value)))
           .map((o: { date: string; value: string }) => ({ date: o.date, value: parseFloat(o.value) }))
