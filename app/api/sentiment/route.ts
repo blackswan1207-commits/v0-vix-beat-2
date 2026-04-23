@@ -934,23 +934,24 @@ function applyFedPolicy(stage: CycleStage, policy: FedPolicy): CycleStage {
 async function fetchCycleModel(): Promise<CycleData> {
   const label = '景氣循環模型'
   const now = new Date()
-  const fiveYearsAgo = new Date(now)
-  fiveYearsAgo.setFullYear(now.getFullYear() - 5)
-  const tenYearsAgoStr = fiveYearsAgo.toISOString().slice(0, 10)
+  const tenYearsAgo = new Date(now)
+  tenYearsAgo.setFullYear(now.getFullYear() - 10)
+  const tenYearsAgoStr = tenYearsAgo.toISOString().slice(0, 10)
   const sixMonthsAgoStr = new Date(now.getTime() - 180 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
+  const FRED_API_KEY = process.env.FRED_API_KEY ?? ''
+  const FRED_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
 
   try {
-    // Fetch all three data sources in parallel
-    // T10Y3M: start from 10 years ago for historical avg; WALCL: ~6 months for quarterly change
-    const FRED_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+    // T10Y3M: FRED API with monthly aggregation (120 rows vs 2500 daily) for full 10-year window
+    // WALCL: graph CSV, only 6 months needed — small payload
     const [oecdRes, spreadRes, walclRes] = await Promise.all([
       fetch(
         'https://stats.oecd.org/SDMX-JSON/data/MEI_CLI/LOLITOAA.OAVG.M/all?lastNObservations=6',
         { headers: { Accept: 'application/json', 'User-Agent': FRED_UA }, signal: AbortSignal.timeout(20000) }
       ),
       fetch(
-        `https://fred.stlouisfed.org/graph/fredgraph.csv?id=T10Y3M&observation_start=${tenYearsAgoStr}`,
-        { headers: { 'User-Agent': FRED_UA }, signal: AbortSignal.timeout(25000) }
+        `https://api.stlouisfed.org/fred/series/observations?series_id=T10Y3M&observation_start=${tenYearsAgoStr}&frequency=m&aggregation_method=avg&file_type=json&api_key=${FRED_API_KEY}`,
+        { headers: { 'User-Agent': FRED_UA }, signal: AbortSignal.timeout(15000) }
       ),
       fetch(
         `https://fred.stlouisfed.org/graph/fredgraph.csv?id=WALCL&observation_start=${sixMonthsAgoStr}`,
@@ -1000,17 +1001,21 @@ async function fetchCycleModel(): Promise<CycleData> {
     let yieldSpreadStage: CycleStage | null = null
 
     if (spreadRes.ok) {
-      const spreadText = await spreadRes.text()
-      const spreadData = parseFredCsv(spreadText).filter(d => !isNaN(d.value))
-      if (spreadData.length >= 12) {
-        const values = spreadData.map(d => d.value)
-        const avg = mean(values)
-        const std = stdDev(values, avg)
-        yieldSpread = values[values.length - 1]
-        yieldSpreadAvg = avg
-        yieldSpreadStd = std
-        yieldSpreadStage = classifyYieldSpread(yieldSpread, avg, std)
-      }
+      try {
+        const spreadJson = await spreadRes.json()
+        const spreadData: Array<{ date: string; value: number }> = (spreadJson?.observations ?? [])
+          .filter((o: { value: string }) => o.value !== '.' && !isNaN(parseFloat(o.value)))
+          .map((o: { date: string; value: string }) => ({ date: o.date, value: parseFloat(o.value) }))
+        if (spreadData.length >= 12) {
+          const values = spreadData.map(d => d.value)
+          const avg = mean(values)
+          const std = stdDev(values, avg)
+          yieldSpread = values[values.length - 1]
+          yieldSpreadAvg = avg
+          yieldSpreadStd = std
+          yieldSpreadStage = classifyYieldSpread(yieldSpread, avg, std)
+        }
+      } catch { /* leave null */ }
     }
 
     // ── Fed Total Assets (WALCL) ──
