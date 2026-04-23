@@ -962,6 +962,12 @@ async function fetchCycleModel(): Promise<CycleData> {
     const oecdRes = oecdResult.status === 'fulfilled' ? oecdResult.value : null
     const spreadRes = spreadResult.status === 'fulfilled' ? spreadResult.value : null
     const walclRes = walclResult.status === 'fulfilled' ? walclResult.value : null
+    console.log('[cycle] fetch results:',
+      'oecd=', oecdResult.status, oecdRes?.status,
+      'spread=', spreadResult.status, spreadRes?.status,
+      'walcl=', walclResult.status, walclRes?.status,
+      'key_len=', FRED_API_KEY?.length
+    )
 
     // ── OECD CLI (G7 Amplitude-Adjusted, series key 13:0:1:0:1:1:0:0:0) ──
     let oecdCli: number | null = null
