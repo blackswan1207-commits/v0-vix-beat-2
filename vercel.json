@@ -3,5 +3,11 @@
     "app/api/sentiment/route.ts": {
       "maxDuration": 60
     }
-  }
+  },
+  "crons": [
+    {
+      "path": "/api/cron/contango",
+      "schedule": "0 23 * * 0-4"
+    }
+  ]
 }
