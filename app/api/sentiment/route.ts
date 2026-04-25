@@ -225,6 +225,52 @@ async function fetchActiveVixFutures(): Promise<VixFuturesContract[]> {
   return contracts
 }
 
+// ── Contango Gist history (persistent across serverless cold starts) ──
+const CONTANGO_GIST_ID = '1a486a43e09009d5afc46ebdf15c8c95'
+const CONTANGO_GIST_FILE = 'contango_history.json'
+
+async function readContangoHistory(): Promise<HistoricalPoint[]> {
+  try {
+    const url = `https://gist.githubusercontent.com/blackswan1207-commits/${CONTANGO_GIST_ID}/raw/${CONTANGO_GIST_FILE}`
+    const res = await fetch(url, { signal: AbortSignal.timeout(8000) })
+    if (!res.ok) return []
+    const json = await res.json()
+    return Array.isArray(json.data) ? json.data : []
+  } catch {
+    return []
+  }
+}
+
+async function appendContangoHistory(point: HistoricalPoint): Promise<HistoricalPoint[]> {
+  const existing = await readContangoHistory()
+  const alreadyExists = existing.some(p => p.date === point.date)
+  if (!alreadyExists) existing.push(point)
+  const trimmed = existing.slice(-10)
+
+  const token = process.env.GITHUB_TOKEN
+  if (token) {
+    try {
+      await fetch(`https://api.github.com/gists/${CONTANGO_GIST_ID}`, {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          files: {
+            [CONTANGO_GIST_FILE]: {
+              content: JSON.stringify({ updated_at: point.date, data: trimmed }),
+            },
+          },
+        }),
+        signal: AbortSignal.timeout(8000),
+      })
+    } catch { /* write failed, return what we have */ }
+  }
+
+  return trimmed
+}
+
 async function fetchContango(): Promise<ContangoData> {
   const label = 'Contango'
   let f1Label = 'VIX(F1)'
@@ -268,7 +314,7 @@ async function fetchContango(): Promise<ContangoData> {
       const spread = f2 - f1
       const contango = (spread / f1) * 100
       const today = todayStr()
-      const history = appendHistory(label, { date: today, value: contango })
+      const history = await appendContangoHistory({ date: today, value: contango })
 
       return {
         label,
