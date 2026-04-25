@@ -997,43 +997,49 @@ async function fetchCycleModel(): Promise<CycleData> {
   tenYearsAgo.setFullYear(now.getFullYear() - 10)
   const tenYearsAgoStr = tenYearsAgo.toISOString().slice(0, 10)
   const sixMonthsAgoStr = new Date(now.getTime() - 180 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
+  const FRED_API_KEY = process.env.FRED_API_KEY ?? ''
+  const FRED_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
 
   try {
-    // Fetch all three data sources in parallel
-    // T10Y3M: start from 10 years ago for historical avg; WALCL: ~6 months for quarterly change
-    const FRED_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
-    const [oecdRes, spreadRes, walclRes] = await Promise.all([
+    // allSettled: one slow source won't block the others
+    // OECD: 45s — slow API, large SDMX-JSON body
+    // FRED T10Y3M: 20s — official API, monthly data ~10KB
+    // WALCL: 20s — official API, weekly data ~3KB (avoid fredgraph.csv which returns all history)
+    const [oecdResult, spreadResult, walclResult] = await Promise.allSettled([
       fetch(
         'https://stats.oecd.org/SDMX-JSON/data/MEI_CLI/LOLITOAA.OAVG.M/all?lastNObservations=6',
-        { headers: { Accept: 'application/json', 'User-Agent': FRED_UA }, signal: AbortSignal.timeout(20000) }
+        { headers: { Accept: 'application/json', 'User-Agent': FRED_UA }, signal: AbortSignal.timeout(45000) }
       ),
       fetch(
-        `https://fred.stlouisfed.org/graph/fredgraph.csv?id=T10Y3M&observation_start=${tenYearsAgoStr}`,
-        { headers: { 'User-Agent': FRED_UA }, signal: AbortSignal.timeout(30000) }
+        `https://api.stlouisfed.org/fred/series/observations?series_id=T10Y3M&observation_start=${tenYearsAgoStr}&frequency=m&aggregation_method=avg&file_type=json&api_key=${FRED_API_KEY}`,
+        { headers: { 'User-Agent': FRED_UA }, signal: AbortSignal.timeout(20000) }
       ),
       fetch(
-        `https://fred.stlouisfed.org/graph/fredgraph.csv?id=WALCL&observation_start=${sixMonthsAgoStr}`,
+        `https://api.stlouisfed.org/fred/series/observations?series_id=WALCL&observation_start=${sixMonthsAgoStr}&frequency=w&file_type=json&api_key=${FRED_API_KEY}`,
         { headers: { 'User-Agent': FRED_UA }, signal: AbortSignal.timeout(20000) }
       ),
     ])
+    const oecdRes = oecdResult.status === 'fulfilled' ? oecdResult.value : null
+    const spreadRes = spreadResult.status === 'fulfilled' ? spreadResult.value : null
+    const walclRes = walclResult.status === 'fulfilled' ? walclResult.value : null
+    let oecdJson: unknown = null, spreadJson: unknown = null
+    if (oecdRes?.ok) try { oecdJson = await oecdRes.json() } catch { oecdJson = null }
+    if (spreadRes?.ok) try { spreadJson = await spreadRes.json() } catch { spreadJson = null }
 
-    // ── OECD CLI (G7 Amplitude-Adjusted, series key 13:0:1:0:1:1:0:0:0) ──
+    // ── OECD CLI ──
     let oecdCli: number | null = null
     let oecdCliDirection: 'rising' | 'falling' | null = null
     let oecdCliStage: CycleStage | null = null
 
-    if (oecdRes.ok) {
+    if (oecdRes?.ok && oecdJson) {
       try {
-        const json = await oecdRes.json()
-        // New OECD SDMX-JSON structure: data.structures[0].dimensions.observation[0].values
-        const structs = json?.data?.structures?.[0]
+        const json = oecdJson as Record<string, unknown>
+        const structs = (json?.data as Record<string, unknown>)?.structures?.[0]
         const timeDimValues = structs?.dimensions?.observation?.[0]?.values as Array<{ id: string }> | undefined
         const idxToDate: Record<number, string> = {}
         if (timeDimValues) {
           timeDimValues.forEach((v, i) => { idxToDate[i] = v.id })
         }
-        // NAFTA (USA+Canada+Mexico) amplitude-adjusted CLI — correct LI series with latest data
-        // (OECD Total/OAVG not available in this endpoint; NAFTA is best available world proxy)
         const G7_AA_KEY = '51:0:0:0:1:1:0:0:0'
         const seriesObs = json?.data?.dataSets?.[0]?.series?.[G7_AA_KEY]?.observations as Record<string, [number, number]> | undefined
         if (seriesObs && Object.keys(idxToDate).length > 0) {
@@ -1058,36 +1064,42 @@ async function fetchCycleModel(): Promise<CycleData> {
     let yieldSpreadStd: number | null = null
     let yieldSpreadStage: CycleStage | null = null
 
-    if (spreadRes.ok) {
-      const spreadText = await spreadRes.text()
-      const spreadData = parseFredCsv(spreadText).filter(d => !isNaN(d.value))
-      if (spreadData.length >= 12) {
-        const values = spreadData.map(d => d.value)
-        const avg = mean(values)
-        const std = stdDev(values, avg)
-        yieldSpread = values[values.length - 1]
-        yieldSpreadAvg = avg
-        yieldSpreadStd = std
-        yieldSpreadStage = classifyYieldSpread(yieldSpread, avg, std)
-      }
+    if (spreadRes?.ok && spreadJson) {
+      try {
+        const spreadData: Array<{ date: string; value: number }> = (spreadJson?.observations ?? [])
+          .filter((o: { value: string }) => o.value !== '.' && !isNaN(parseFloat(o.value)))
+          .map((o: { date: string; value: string }) => ({ date: o.date, value: parseFloat(o.value) }))
+        if (spreadData.length >= 12) {
+          const values = spreadData.map(d => d.value)
+          const avg = mean(values)
+          const std = stdDev(values, avg)
+          yieldSpread = values[values.length - 1]
+          yieldSpreadAvg = avg
+          yieldSpreadStd = std
+          yieldSpreadStage = classifyYieldSpread(yieldSpread, avg, std)
+        }
+      } catch { /* leave null */ }
     }
 
     // ── Fed Total Assets (WALCL) ──
     let fedAssetsChangeQoQ: number | null = null
     let fedPolicy: FedPolicy | null = null
 
-    if (walclRes.ok) {
-      const walclText = await walclRes.text()
-      const walclData = parseFredCsv(walclText).filter(d => !isNaN(d.value))
-      if (walclData.length >= 14) {
-        // Weekly data: ~13 weeks = 1 quarter
-        const latest = walclData[walclData.length - 1].value
-        const quarterAgo = walclData[walclData.length - 14].value
-        fedAssetsChangeQoQ = ((latest - quarterAgo) / quarterAgo) * 100
-        if (fedAssetsChangeQoQ >= 3) fedPolicy = 'QE'
-        else if (fedAssetsChangeQoQ < -1) fedPolicy = 'QT'
-        else fedPolicy = 'QN'
-      }
+    if (walclRes?.ok) {
+      try {
+        const walclJson = await walclRes.json()
+        const walclData: Array<{ value: number }> = (walclJson?.observations ?? [])
+          .filter((o: { value: string }) => o.value !== '.' && !isNaN(parseFloat(o.value)))
+          .map((o: { value: string }) => ({ value: parseFloat(o.value) }))
+        if (walclData.length >= 14) {
+          const latest = walclData[walclData.length - 1].value
+          const quarterAgo = walclData[walclData.length - 14].value
+          fedAssetsChangeQoQ = ((latest - quarterAgo) / quarterAgo) * 100
+          if (fedAssetsChangeQoQ >= 3) fedPolicy = 'QE'
+          else if (fedAssetsChangeQoQ < -1) fedPolicy = 'QT'
+          else fedPolicy = 'QN'
+        }
+      } catch { /* leave null */ }
     }
 
     // ── Combine stages ──
