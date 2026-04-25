@@ -38,7 +38,6 @@ async function fetchYahooQuote(
   symbol: string
 ): Promise<{ price: number; previousClose: number } | null> {
   try {
-    // Use Yahoo Finance v8 chart endpoint for reliable data
     const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=1d&interval=1d`
     const res = await fetch(url, {
       headers: {
@@ -60,19 +59,59 @@ async function fetchYahooQuote(
   }
 }
 
+async function fetchYahooWithHistory(
+  symbol: string
+): Promise<{ price: number; previousClose: number; history: HistoricalPoint[] } | null> {
+  try {
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=14d&interval=1d`
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      },
+      signal: AbortSignal.timeout(10000),
+    })
+    if (!res.ok) throw new Error(`Yahoo HTTP ${res.status}`)
+    const json = await res.json()
+    const result = json?.chart?.result?.[0]
+    if (!result) throw new Error('No result in Yahoo response')
+
+    const meta = result.meta
+    const timestamps: number[] = result.timestamp || []
+    const closes: number[] = result.indicators?.quote?.[0]?.close || []
+
+    const history: HistoricalPoint[] = []
+    for (let i = 0; i < timestamps.length; i++) {
+      const ts = timestamps[i]
+      const close = closes[i]
+      if (ts == null || close == null || isNaN(close)) continue
+      history.push({ date: new Date(ts * 1000).toISOString().slice(0, 10), value: close })
+    }
+
+    return {
+      price: meta.regularMarketPrice ?? meta.previousClose,
+      previousClose: meta.chartPreviousClose ?? meta.previousClose,
+      history,
+    }
+  } catch {
+    return null
+  }
+}
+
 async function fetchVIX(): Promise<IndicatorData> {
   const label = 'VIX'
   try {
-    const quote = await fetchYahooQuote('^VIX')
-    if (!quote) throw new Error('Yahoo Finance VIX request failed')
+    const result = await fetchYahooWithHistory('^VIX')
+    if (!result) throw new Error('Yahoo Finance VIX request failed')
 
-    const change = quote.price - quote.previousClose
-    const today = todayStr()
-    const history = appendHistory(label, { date: today, value: quote.price })
+    const change = result.price - result.previousClose
+    const history = result.history.length >= 2
+      ? result.history
+      : appendHistory(label, { date: todayStr(), value: result.price })
 
     return {
       label,
-      value: quote.price,
+      value: result.price,
       change,
       history,
       lastUpdated: new Date().toISOString(),
@@ -87,16 +126,17 @@ async function fetchVIX(): Promise<IndicatorData> {
 async function fetchVVIX(): Promise<IndicatorData> {
   const label = 'VVIX'
   try {
-    const quote = await fetchYahooQuote('^VVIX')
-    if (!quote) throw new Error('Yahoo Finance VVIX request failed')
+    const result = await fetchYahooWithHistory('^VVIX')
+    if (!result) throw new Error('Yahoo Finance VVIX request failed')
 
-    const change = quote.price - quote.previousClose
-    const today = todayStr()
-    const history = appendHistory(label, { date: today, value: quote.price })
+    const change = result.price - result.previousClose
+    const history = result.history.length >= 2
+      ? result.history
+      : appendHistory(label, { date: todayStr(), value: result.price })
 
     return {
       label,
-      value: quote.price,
+      value: result.price,
       change,
       history,
       lastUpdated: new Date().toISOString(),
@@ -377,10 +417,9 @@ async function fetchCryptoFearGreedFromCoinGlass(): Promise<{ value: number; cla
   }
 }
 
-async function fetchCryptoFearGreedFromAlternativeMe(): Promise<{ value: number; classification: string; previousValue: number | null } | null> {
+async function fetchCryptoFearGreedFromAlternativeMe(): Promise<{ value: number; classification: string; previousValue: number | null; history: HistoricalPoint[] } | null> {
   try {
-    // alternative.me free public API - no key required
-    const res = await fetch('https://api.alternative.me/fng/?limit=2', {
+    const res = await fetch('https://api.alternative.me/fng/?limit=10', {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Accept': 'application/json',
@@ -401,7 +440,16 @@ async function fetchCryptoFearGreedFromAlternativeMe(): Promise<{ value: number;
     const classification = latest.value_classification || getCryptoClassification(value)
     const previousValue = entries.length > 1 ? parseInt(entries[1].value, 10) : null
 
-    return { value, classification, previousValue: isNaN(previousValue as number) ? null : previousValue }
+    // entries are newest-first; reverse for chronological sparkline order
+    const history: HistoricalPoint[] = [...entries]
+      .reverse()
+      .map(e => ({
+        date: new Date(parseInt(e.timestamp, 10) * 1000).toISOString().slice(0, 10),
+        value: parseInt(e.value, 10),
+      }))
+      .filter(p => !isNaN(p.value))
+
+    return { value, classification, previousValue: isNaN(previousValue as number) ? null : previousValue, history }
   } catch {
     return null
   }
@@ -414,8 +462,9 @@ async function fetchCryptoFearGreed(): Promise<CryptoFearGreedData> {
     let classification: string | undefined
     let change: number | null = null
     let source = ''
+    let history: HistoricalPoint[] = []
 
-    // === Primary: CoinGlass scraping ===
+    // === Primary: CoinGlass scraping (point-in-time only) ===
     const coinglassResult = await fetchCryptoFearGreedFromCoinGlass()
     if (coinglassResult) {
       value = coinglassResult.value
@@ -423,13 +472,14 @@ async function fetchCryptoFearGreed(): Promise<CryptoFearGreedData> {
       source = 'CoinGlass'
     }
 
-    // === Fallback: alternative.me free API ===
+    // === Fallback: alternative.me free API (includes 10-day history) ===
     if (value === null) {
       const altResult = await fetchCryptoFearGreedFromAlternativeMe()
       if (altResult) {
         value = altResult.value
         classification = altResult.classification
         source = 'alternative.me'
+        history = altResult.history
         if (altResult.previousValue !== null) {
           change = value - altResult.previousValue
         }
@@ -440,8 +490,15 @@ async function fetchCryptoFearGreed(): Promise<CryptoFearGreedData> {
       throw new Error('CoinGlass + alternative.me 均無法取得加密貨幣恐慌指數')
     }
 
-    const today = todayStr()
-    const history = appendHistory(label, { date: today, value })
+    // If we got value from CoinGlass but no history, try alternative.me just for history
+    if (history.length < 2) {
+      const altResult = await fetchCryptoFearGreedFromAlternativeMe()
+      if (altResult && altResult.history.length >= 2) {
+        history = altResult.history
+      } else {
+        history = appendHistory(label, { date: todayStr(), value })
+      }
+    }
 
     return {
       label,
@@ -940,45 +997,36 @@ async function fetchCycleModel(): Promise<CycleData> {
   tenYearsAgo.setFullYear(now.getFullYear() - 10)
   const tenYearsAgoStr = tenYearsAgo.toISOString().slice(0, 10)
   const sixMonthsAgoStr = new Date(now.getTime() - 180 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
-  const FRED_API_KEY = process.env.FRED_API_KEY ?? ''
-  const FRED_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
 
   try {
-    // allSettled: one slow source won't block the others
-    // OECD: 45s — slow API, large SDMX-JSON body
-    // FRED T10Y3M: 20s — official API, monthly data ~10KB
-    // WALCL: 20s — official API, weekly data ~3KB (avoid fredgraph.csv which returns all history)
-    const [oecdResult, spreadResult, walclResult] = await Promise.allSettled([
+    // Fetch all three data sources in parallel
+    // T10Y3M: start from 10 years ago for historical avg; WALCL: ~6 months for quarterly change
+    const FRED_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+    const [oecdRes, spreadRes, walclRes] = await Promise.all([
       fetch(
         'https://stats.oecd.org/SDMX-JSON/data/MEI_CLI/LOLITOAA.OAVG.M/all?lastNObservations=6',
-        { headers: { Accept: 'application/json', 'User-Agent': FRED_UA }, signal: AbortSignal.timeout(45000) }
+        { headers: { Accept: 'application/json', 'User-Agent': FRED_UA }, signal: AbortSignal.timeout(20000) }
       ),
       fetch(
-        `https://api.stlouisfed.org/fred/series/observations?series_id=T10Y3M&observation_start=${tenYearsAgoStr}&frequency=m&aggregation_method=avg&file_type=json&api_key=${FRED_API_KEY}`,
-        { headers: { 'User-Agent': FRED_UA }, signal: AbortSignal.timeout(20000) }
+        `https://fred.stlouisfed.org/graph/fredgraph.csv?id=T10Y3M&observation_start=${tenYearsAgoStr}`,
+        { headers: { 'User-Agent': FRED_UA }, signal: AbortSignal.timeout(30000) }
       ),
       fetch(
-        `https://api.stlouisfed.org/fred/series/observations?series_id=WALCL&observation_start=${sixMonthsAgoStr}&frequency=w&file_type=json&api_key=${FRED_API_KEY}`,
+        `https://fred.stlouisfed.org/graph/fredgraph.csv?id=WALCL&observation_start=${sixMonthsAgoStr}`,
         { headers: { 'User-Agent': FRED_UA }, signal: AbortSignal.timeout(20000) }
       ),
     ])
-    const oecdRes = oecdResult.status === 'fulfilled' ? oecdResult.value : null
-    const spreadRes = spreadResult.status === 'fulfilled' ? spreadResult.value : null
-    const walclRes = walclResult.status === 'fulfilled' ? walclResult.value : null
-    let oecdJson: unknown = null, spreadJson: unknown = null
-    if (oecdRes?.ok) try { oecdJson = await oecdRes.json() } catch { oecdJson = null }
-    if (spreadRes?.ok) try { spreadJson = await spreadRes.json() } catch { spreadJson = null }
 
     // ── OECD CLI (G7 Amplitude-Adjusted, series key 13:0:1:0:1:1:0:0:0) ──
     let oecdCli: number | null = null
     let oecdCliDirection: 'rising' | 'falling' | null = null
     let oecdCliStage: CycleStage | null = null
 
-    if (oecdRes?.ok && oecdJson) {
+    if (oecdRes.ok) {
       try {
-        const json = oecdJson as Record<string, unknown>
+        const json = await oecdRes.json()
         // New OECD SDMX-JSON structure: data.structures[0].dimensions.observation[0].values
-        const structs = (json?.data as Record<string, unknown>)?.structures?.[0]
+        const structs = json?.data?.structures?.[0]
         const timeDimValues = structs?.dimensions?.observation?.[0]?.values as Array<{ id: string }> | undefined
         const idxToDate: Record<number, string> = {}
         if (timeDimValues) {
@@ -1010,42 +1058,36 @@ async function fetchCycleModel(): Promise<CycleData> {
     let yieldSpreadStd: number | null = null
     let yieldSpreadStage: CycleStage | null = null
 
-    if (spreadRes?.ok && spreadJson) {
-      try {
-        const spreadData: Array<{ date: string; value: number }> = (spreadJson?.observations ?? [])
-          .filter((o: { value: string }) => o.value !== '.' && !isNaN(parseFloat(o.value)))
-          .map((o: { date: string; value: string }) => ({ date: o.date, value: parseFloat(o.value) }))
-        if (spreadData.length >= 12) {
-          const values = spreadData.map(d => d.value)
-          const avg = mean(values)
-          const std = stdDev(values, avg)
-          yieldSpread = values[values.length - 1]
-          yieldSpreadAvg = avg
-          yieldSpreadStd = std
-          yieldSpreadStage = classifyYieldSpread(yieldSpread, avg, std)
-        }
-      } catch { /* leave null */ }
+    if (spreadRes.ok) {
+      const spreadText = await spreadRes.text()
+      const spreadData = parseFredCsv(spreadText).filter(d => !isNaN(d.value))
+      if (spreadData.length >= 12) {
+        const values = spreadData.map(d => d.value)
+        const avg = mean(values)
+        const std = stdDev(values, avg)
+        yieldSpread = values[values.length - 1]
+        yieldSpreadAvg = avg
+        yieldSpreadStd = std
+        yieldSpreadStage = classifyYieldSpread(yieldSpread, avg, std)
+      }
     }
 
     // ── Fed Total Assets (WALCL) ──
     let fedAssetsChangeQoQ: number | null = null
     let fedPolicy: FedPolicy | null = null
 
-    if (walclRes?.ok) {
-      try {
-        const walclJson = await walclRes.json()
-        const walclData: Array<{ value: number }> = (walclJson?.observations ?? [])
-          .filter((o: { value: string }) => o.value !== '.' && !isNaN(parseFloat(o.value)))
-          .map((o: { value: string }) => ({ value: parseFloat(o.value) }))
-        if (walclData.length >= 14) {
-          const latest = walclData[walclData.length - 1].value
-          const quarterAgo = walclData[walclData.length - 14].value
-          fedAssetsChangeQoQ = ((latest - quarterAgo) / quarterAgo) * 100
-          if (fedAssetsChangeQoQ >= 3) fedPolicy = 'QE'
-          else if (fedAssetsChangeQoQ < -1) fedPolicy = 'QT'
-          else fedPolicy = 'QN'
-        }
-      } catch { /* leave null */ }
+    if (walclRes.ok) {
+      const walclText = await walclRes.text()
+      const walclData = parseFredCsv(walclText).filter(d => !isNaN(d.value))
+      if (walclData.length >= 14) {
+        // Weekly data: ~13 weeks = 1 quarter
+        const latest = walclData[walclData.length - 1].value
+        const quarterAgo = walclData[walclData.length - 14].value
+        fedAssetsChangeQoQ = ((latest - quarterAgo) / quarterAgo) * 100
+        if (fedAssetsChangeQoQ >= 3) fedPolicy = 'QE'
+        else if (fedAssetsChangeQoQ < -1) fedPolicy = 'QT'
+        else fedPolicy = 'QN'
+      }
     }
 
     // ── Combine stages ──
