@@ -303,14 +303,13 @@ async function fetchContango(): Promise<ContangoData> {
 async function fetchFearGreed(): Promise<FearGreedData> {
   const label = 'CNN Fear & Greed'
   try {
-    // CNN provides a public API endpoint for fear & greed
     const res = await fetch(
       'https://production.dataviz.cnn.io/index/fearandgreed/graphdata',
       {
         headers: {
-          'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
           Accept: 'application/json',
+          Referer: 'https://edition.cnn.com/',
         },
         signal: AbortSignal.timeout(10000),
       }
@@ -324,15 +323,24 @@ async function fetchFearGreed(): Promise<FearGreedData> {
 
     const score = fgData.score
     const previousClose = fgData.previous_close
-    const classification = fgData.rating // e.g., "Fear", "Greed", "Extreme Fear"
+    const classification = fgData.rating
 
     if (typeof score !== 'number') throw new Error('Invalid score from CNN')
 
-    const change =
-      typeof previousClose === 'number' ? score - previousClose : null
+    const change = typeof previousClose === 'number' ? score - previousClose : null
 
-    const today = todayStr()
-    const history = appendHistory(label, { date: today, value: score })
+    // Parse historical data from the same response
+    const histRaw: Array<{ x: number; y: number }> = json?.fear_and_greed_historical?.data ?? []
+    let history: HistoricalPoint[]
+    if (histRaw.length >= 2) {
+      // Take last 10 entries, convert ms timestamp → YYYY-MM-DD
+      history = histRaw.slice(-10).map(p => ({
+        date: new Date(p.x).toISOString().slice(0, 10),
+        value: p.y,
+      }))
+    } else {
+      history = appendHistory(label, { date: todayStr(), value: score })
+    }
 
     return {
       label,
