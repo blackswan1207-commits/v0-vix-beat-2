@@ -39,7 +39,7 @@ async function fetchContangoValue(): Promise<number | null> {
     const contracts = data
       .map((item: { s: string; d: [number, string, number] }) => {
         const sym = item.s?.split(':')?.[1]
-        if (!sym || sym.includes('!') || sym.startsWith('VXM')) return null
+        if (!sym || !/^VX[FGHJKMNQUVXZ]\d{4}$/.test(sym)) return null
         const [price, , expiration] = item.d
         if (typeof price !== 'number' || !expiration) return null
         return { price, expiration }

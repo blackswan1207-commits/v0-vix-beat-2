@@ -197,16 +197,11 @@ async function fetchActiveVixFutures(): Promise<VixFuturesContract[]> {
     const fullSymbol: string = item.s // e.g. "CBOE:VXH2026"
     const [, symbol] = fullSymbol.split(':') // "VXH2026"
 
-    // Skip if not a symbol we can parse
-    if (!symbol) continue
-
-    // Skip continuous contracts (e.g. "VX1!", "VXM1!")
-    if (symbol.includes('!')) continue
-
-    // Skip Mini VXM contracts (symbol starts with VXM followed by letter)
-    // Standard VIX: VX + month_code + year (e.g. VXH2026)
-    // Mini VIX:     VXM + month_code + year (e.g. VXMH2026)
-    if (symbol.startsWith('VXM')) continue
+    // Only accept standard monthly VIX futures: VX + single month letter + 4-digit year
+    // e.g. VXK2026 (May), VXM2026 (June), VXN2026 (July)
+    // Rejects: VX1! (continuous), VX21K2026 (weekly), VXMK2026 (Mini VIX)
+    // IMPORTANT: VXM2026 = June standard — must NOT be excluded despite starting with 'VXM'
+    if (!/^VX[FGHJKMNQUVXZ]\d{4}$/.test(symbol)) continue
 
     const [close, description, expiration] = item.d
     if (typeof close !== 'number' || !expiration) continue
