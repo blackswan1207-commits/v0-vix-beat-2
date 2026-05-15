@@ -1050,15 +1050,11 @@ async function fetchCycleModel(): Promise<CycleData> {
   const FRED_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
 
   try {
-    // allSettled: one slow source won't block the others
-    // OECD: 45s — slow API, large SDMX-JSON body
+    // OECD API (stats.oecd.org) deprecated → 301 to sdmx.oecd.org which returns 403
+    // OECD CLI fetched via Gist relay (local launchd monthly) — for now skip live fetch
     // FRED T10Y3M: 20s — official API, monthly data ~10KB
-    // WALCL: 20s — official API, weekly data ~3KB (avoid fredgraph.csv which returns all history)
-    const [oecdResult, spreadResult, walclResult] = await Promise.allSettled([
-      fetch(
-        'https://stats.oecd.org/SDMX-JSON/data/MEI_CLI/LOLITOAA.G20.M/all?lastNObservations=6',
-        { headers: { Accept: 'application/json', 'User-Agent': FRED_UA }, signal: AbortSignal.timeout(45000) }
-      ),
+    // WALCL: 20s — official API, weekly data ~3KB
+    const [spreadResult, walclResult] = await Promise.allSettled([
       fetch(
         `https://api.stlouisfed.org/fred/series/observations?series_id=T10Y3M&observation_start=${tenYearsAgoStr}&frequency=m&aggregation_method=avg&file_type=json&api_key=${FRED_API_KEY}`,
         { headers: { 'User-Agent': FRED_UA }, signal: AbortSignal.timeout(20000) }
@@ -1068,19 +1064,17 @@ async function fetchCycleModel(): Promise<CycleData> {
         { headers: { 'User-Agent': FRED_UA }, signal: AbortSignal.timeout(20000) }
       ),
     ])
-    const oecdRes = oecdResult.status === 'fulfilled' ? oecdResult.value : null
     const spreadRes = spreadResult.status === 'fulfilled' ? spreadResult.value : null
     const walclRes = walclResult.status === 'fulfilled' ? walclResult.value : null
-    let oecdJson: unknown = null, spreadJson: unknown = null
-    if (oecdRes?.ok) try { oecdJson = await oecdRes.json() } catch { oecdJson = null }
+    let spreadJson: unknown = null
     if (spreadRes?.ok) try { spreadJson = await spreadRes.json() } catch { spreadJson = null }
 
-    // ── OECD CLI ──
+    // ── OECD CLI — temporarily disabled (OECD API blocked, Gist relay pending) ──
     let oecdCli: number | null = null
     let oecdCliDirection: 'rising' | 'falling' | null = null
     let oecdCliStage: CycleStage | null = null
 
-    if (oecdRes?.ok && oecdJson) {
+    if (false) {
       try {
         const json = oecdJson as Record<string, unknown>
         const structs = (json?.data as Record<string, unknown>)?.structures?.[0]
