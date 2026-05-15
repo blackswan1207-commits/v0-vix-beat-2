@@ -1056,7 +1056,7 @@ async function fetchCycleModel(): Promise<CycleData> {
     // WALCL: 20s — official API, weekly data ~3KB (avoid fredgraph.csv which returns all history)
     const [oecdResult, spreadResult, walclResult] = await Promise.allSettled([
       fetch(
-        'https://stats.oecd.org/SDMX-JSON/data/MEI_CLI/LOLITOAA.OAVG.M/all?lastNObservations=6',
+        'https://stats.oecd.org/SDMX-JSON/data/MEI_CLI/LOLITOAA.G20.M/all?lastNObservations=6',
         { headers: { Accept: 'application/json', 'User-Agent': FRED_UA }, signal: AbortSignal.timeout(45000) }
       ),
       fetch(
@@ -1089,8 +1089,10 @@ async function fetchCycleModel(): Promise<CycleData> {
         if (timeDimValues) {
           timeDimValues.forEach((v, i) => { idxToDate[i] = v.id })
         }
-        const G7_AA_KEY = '51:0:0:0:1:1:0:0:0'
-        const seriesObs = json?.data?.dataSets?.[0]?.series?.[G7_AA_KEY]?.observations as Record<string, [number, number]> | undefined
+        // G20 URL returns only one series — take the first key dynamically (avoid hardcoded index)
+        const allSeries = (json?.data as Record<string, unknown>)?.dataSets?.[0]?.series as Record<string, { observations: Record<string, [number, number]> }> | undefined
+        const firstKey = allSeries ? Object.keys(allSeries)[0] : undefined
+        const seriesObs = firstKey ? allSeries?.[firstKey]?.observations as Record<string, [number, number]> | undefined : undefined
         if (seriesObs && Object.keys(idxToDate).length > 0) {
           const entries = Object.entries(seriesObs)
             .map(([idx, arr]) => ({ date: idxToDate[Number(idx)] ?? '', value: arr[0] }))
