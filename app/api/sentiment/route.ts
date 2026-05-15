@@ -1052,9 +1052,12 @@ async function fetchCycleModel(): Promise<CycleData> {
   try {
     // OECD API (stats.oecd.org) deprecated → 301 to sdmx.oecd.org which returns 403
     // OECD CLI fetched via Gist relay (local launchd monthly) — for now skip live fetch
+    // OECD CLI: GitHub Gist relay (local launchd monthly update on 12th)
     // FRED T10Y3M: 20s — official API, monthly data ~10KB
     // WALCL: 20s — official API, weekly data ~3KB
-    const [spreadResult, walclResult] = await Promise.allSettled([
+    const OECD_GIST_URL = 'https://gist.githubusercontent.com/blackswan1207-commits/9250d2a987aeebd6d6ec6f61a47b6f23/raw/oecd-cli.json'
+    const [oecdResult, spreadResult, walclResult] = await Promise.allSettled([
+      fetch(OECD_GIST_URL, { signal: AbortSignal.timeout(10000) }),
       fetch(
         `https://api.stlouisfed.org/fred/series/observations?series_id=T10Y3M&observation_start=${tenYearsAgoStr}&frequency=m&aggregation_method=avg&file_type=json&api_key=${FRED_API_KEY}`,
         { headers: { 'User-Agent': FRED_UA }, signal: AbortSignal.timeout(20000) }
@@ -1064,41 +1067,24 @@ async function fetchCycleModel(): Promise<CycleData> {
         { headers: { 'User-Agent': FRED_UA }, signal: AbortSignal.timeout(20000) }
       ),
     ])
+    const oecdRes = oecdResult.status === 'fulfilled' ? oecdResult.value : null
     const spreadRes = spreadResult.status === 'fulfilled' ? spreadResult.value : null
     const walclRes = walclResult.status === 'fulfilled' ? walclResult.value : null
     let spreadJson: unknown = null
     if (spreadRes?.ok) try { spreadJson = await spreadRes.json() } catch { spreadJson = null }
 
-    // ── OECD CLI — temporarily disabled (OECD API blocked, Gist relay pending) ──
+    // ── OECD CLI — read from GitHub Gist relay ──
     let oecdCli: number | null = null
     let oecdCliDirection: 'rising' | 'falling' | null = null
     let oecdCliStage: CycleStage | null = null
 
-    if (false) {
+    if (oecdRes?.ok) {
       try {
-        const json = oecdJson as Record<string, unknown>
-        const structs = (json?.data as Record<string, unknown>)?.structures?.[0]
-        const timeDimValues = structs?.dimensions?.observation?.[0]?.values as Array<{ id: string }> | undefined
-        const idxToDate: Record<number, string> = {}
-        if (timeDimValues) {
-          timeDimValues.forEach((v, i) => { idxToDate[i] = v.id })
-        }
-        // G20 URL returns only one series — take the first key dynamically (avoid hardcoded index)
-        const allSeries = (json?.data as Record<string, unknown>)?.dataSets?.[0]?.series as Record<string, { observations: Record<string, [number, number]> }> | undefined
-        const firstKey = allSeries ? Object.keys(allSeries)[0] : undefined
-        const seriesObs = firstKey ? allSeries?.[firstKey]?.observations as Record<string, [number, number]> | undefined : undefined
-        if (seriesObs && Object.keys(idxToDate).length > 0) {
-          const entries = Object.entries(seriesObs)
-            .map(([idx, arr]) => ({ date: idxToDate[Number(idx)] ?? '', value: arr[0] }))
-            .filter(e => e.date && e.value != null && !isNaN(e.value))
-            .sort((a, b) => a.date.localeCompare(b.date))
-          if (entries.length >= 2) {
-            const last = entries[entries.length - 1]
-            const prev = entries[entries.length - 2]
-            oecdCli = last.value
-            oecdCliDirection = last.value > prev.value ? 'rising' : 'falling'
-            oecdCliStage = classifyOecdCli(oecdCli, oecdCliDirection)
-          }
+        const gistJson = await oecdRes.json() as { value?: number; direction?: string; stage?: string }
+        if (gistJson?.value != null && !isNaN(gistJson.value)) {
+          oecdCli = gistJson.value
+          oecdCliDirection = gistJson.direction === 'falling' ? 'falling' : 'rising'
+          oecdCliStage = classifyOecdCli(oecdCli, oecdCliDirection)
         }
       } catch { /* parse error, continue */ }
     }
