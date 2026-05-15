@@ -1070,8 +1070,12 @@ async function fetchCycleModel(): Promise<CycleData> {
     const oecdRes = oecdResult.status === 'fulfilled' ? oecdResult.value : null
     const spreadRes = spreadResult.status === 'fulfilled' ? spreadResult.value : null
     const walclRes = walclResult.status === 'fulfilled' ? walclResult.value : null
+    // DEBUG: log fetch statuses to Vercel runtime logs
+    console.log('[cycle] oecdResult:', oecdResult.status, oecdRes?.status)
+    console.log('[cycle] spreadResult:', spreadResult.status, spreadRes?.status, spreadRes?.ok)
+    console.log('[cycle] walclResult:', walclResult.status, walclRes?.status, walclRes?.ok)
     let spreadJson: unknown = null
-    if (spreadRes?.ok) try { spreadJson = await spreadRes.json() } catch { spreadJson = null }
+    if (spreadRes?.ok) try { spreadJson = await spreadRes.json() } catch (e) { console.log('[cycle] spreadJson parse error:', e); spreadJson = null }
 
     // ── OECD CLI — read from GitHub Gist relay ──
     let oecdCli: number | null = null
