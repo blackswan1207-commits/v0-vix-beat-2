@@ -1052,68 +1052,49 @@ async function fetchCycleModel(): Promise<CycleData> {
   try {
     // OECD API (stats.oecd.org) deprecated → 301 to sdmx.oecd.org which returns 403
     // OECD CLI fetched via Gist relay (local launchd monthly) — for now skip live fetch
-    // OECD CLI: GitHub Gist relay (local launchd monthly update on 12th)
-    // FRED T10Y3M: 20s — official API, monthly data ~10KB
-    // WALCL: 20s — official API, weekly data ~3KB
-    const OECD_GIST_URL = 'https://gist.githubusercontent.com/blackswan1207-commits/9250d2a987aeebd6d6ec6f61a47b6f23/raw/oecd-cli.json'
-    const [oecdResult, spreadResult, walclResult] = await Promise.allSettled([
-      fetch(OECD_GIST_URL, { signal: AbortSignal.timeout(10000) }),
-      fetch(
-        `https://api.stlouisfed.org/fred/series/observations?series_id=T10Y3M&observation_start=${tenYearsAgoStr}&frequency=m&aggregation_method=avg&file_type=json&api_key=${FRED_API_KEY}`,
-        { headers: { 'User-Agent': FRED_UA }, signal: AbortSignal.timeout(20000) }
-      ),
+    // OECD CLI + Yield Spread: GitHub Gist relay (local launchd monthly update on 12th)
+    // WALCL: 20s — FRED official API, weekly data ~3KB (fast, no aggregation needed)
+    const RELAY_GIST_URL = 'https://gist.githubusercontent.com/blackswan1207-commits/9250d2a987aeebd6d6ec6f61a47b6f23/raw/oecd-cli.json'
+    const [gistResult, walclResult] = await Promise.allSettled([
+      fetch(RELAY_GIST_URL, { signal: AbortSignal.timeout(10000) }),
       fetch(
         `https://api.stlouisfed.org/fred/series/observations?series_id=WALCL&observation_start=${sixMonthsAgoStr}&frequency=w&file_type=json&api_key=${FRED_API_KEY}`,
         { headers: { 'User-Agent': FRED_UA }, signal: AbortSignal.timeout(20000) }
       ),
     ])
-    const oecdRes = oecdResult.status === 'fulfilled' ? oecdResult.value : null
-    const spreadRes = spreadResult.status === 'fulfilled' ? spreadResult.value : null
+    const gistRes = gistResult.status === 'fulfilled' ? gistResult.value : null
     const walclRes = walclResult.status === 'fulfilled' ? walclResult.value : null
-    // DEBUG: log fetch statuses to Vercel runtime logs
-    console.log('[cycle] oecdResult:', oecdResult.status, oecdRes?.status)
-    console.log('[cycle] spreadResult:', spreadResult.status, spreadRes?.status, spreadRes?.ok)
-    console.log('[cycle] walclResult:', walclResult.status, walclRes?.status, walclRes?.ok)
-    let spreadJson: unknown = null
-    if (spreadRes?.ok) try { spreadJson = await spreadRes.json() } catch (e) { console.log('[cycle] spreadJson parse error:', e); spreadJson = null }
 
-    // ── OECD CLI — read from GitHub Gist relay ──
+    // ── OECD CLI + Yield Spread — both from Gist relay ──
     let oecdCli: number | null = null
     let oecdCliDirection: 'rising' | 'falling' | null = null
     let oecdCliStage: CycleStage | null = null
-
-    if (oecdRes?.ok) {
-      try {
-        const gistJson = await oecdRes.json() as { value?: number; direction?: string; stage?: string }
-        if (gistJson?.value != null && !isNaN(gistJson.value)) {
-          oecdCli = gistJson.value
-          oecdCliDirection = gistJson.direction === 'falling' ? 'falling' : 'rising'
-          oecdCliStage = classifyOecdCli(oecdCli, oecdCliDirection)
-        }
-      } catch { /* parse error, continue */ }
-    }
-
-    // ── Yield Spread (T10Y3M) ──
     let yieldSpread: number | null = null
     let yieldSpreadAvg: number | null = null
     let yieldSpreadStd: number | null = null
     let yieldSpreadStage: CycleStage | null = null
 
-    if (spreadRes?.ok && spreadJson) {
+    if (gistRes?.ok) {
       try {
-        const spreadData: Array<{ date: string; value: number }> = (spreadJson?.observations ?? [])
-          .filter((o: { value: string }) => o.value !== '.' && !isNaN(parseFloat(o.value)))
-          .map((o: { date: string; value: string }) => ({ date: o.date, value: parseFloat(o.value) }))
-        if (spreadData.length >= 12) {
-          const values = spreadData.map(d => d.value)
-          const avg = mean(values)
-          const std = stdDev(values, avg)
-          yieldSpread = values[values.length - 1]
-          yieldSpreadAvg = avg
-          yieldSpreadStd = std
-          yieldSpreadStage = classifyYieldSpread(yieldSpread, avg, std)
+        type GistPayload = {
+          oecdCli?: { value?: number; direction?: string }
+          yieldSpread?: { current?: number; avg?: number; std?: number }
         }
-      } catch { /* leave null */ }
+        const gist = await gistRes.json() as GistPayload
+        // OECD CLI
+        if (gist?.oecdCli?.value != null && !isNaN(gist.oecdCli.value)) {
+          oecdCli = gist.oecdCli.value
+          oecdCliDirection = gist.oecdCli.direction === 'falling' ? 'falling' : 'rising'
+          oecdCliStage = classifyOecdCli(oecdCli, oecdCliDirection)
+        }
+        // Yield Spread
+        if (gist?.yieldSpread?.current != null && gist?.yieldSpread?.avg != null && gist?.yieldSpread?.std != null) {
+          yieldSpread = gist.yieldSpread.current
+          yieldSpreadAvg = gist.yieldSpread.avg
+          yieldSpreadStd = gist.yieldSpread.std
+          yieldSpreadStage = classifyYieldSpread(yieldSpread, yieldSpreadAvg, yieldSpreadStd)
+        }
+      } catch { /* parse error, continue */ }
     }
 
     // ── Fed Total Assets (WALCL) ──
