@@ -14,7 +14,9 @@ import type {
   CycleData,
   CycleStage,
   FedPolicy,
+  TaiwanCLIData,
 } from '@/lib/types'
+import { TAIWAN_CLI_HISTORY } from '@/lib/taiwan-cli-data'
 
 const CACHE_KEY = 'sentiment-data'
 
@@ -1173,6 +1175,38 @@ async function fetchCycleModel(): Promise<CycleData> {
   }
 }
 
+// ── Taiwan Business Cycle Signal (國發會景氣對策信號) ──
+// 靜態資料維護於 lib/taiwan-cli-data.ts，國發會每月發布後需手動補一筆
+async function fetchTaiwanCLI(): Promise<TaiwanCLIData> {
+  const label = '台灣景氣燈號'
+  try {
+    const sorted = [...TAIWAN_CLI_HISTORY].sort((a, b) => a.date.localeCompare(b.date))
+    const latest = sorted[sorted.length - 1]
+    const prev = sorted[sorted.length - 2]
+    const history = sorted.map(d => ({ date: d.date, value: d.score }))
+    const change = prev ? latest.score - prev.score : null
+    return {
+      label,
+      value: latest.score,
+      change,
+      classification: latest.signal,
+      history,
+      lastUpdated: new Date().toISOString(),
+      dataSource: `國發會 · ${latest.date}`,
+    }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Unknown error'
+    return {
+      label,
+      value: null,
+      change: null,
+      history: [],
+      error: `無法取得景氣燈號 - ${msg}`,
+      lastUpdated: new Date().toISOString(),
+    }
+  }
+}
+
 // ── Main API Route ──
 export async function GET() {
   // Check cache first
@@ -1186,7 +1220,7 @@ export async function GET() {
   }
 
   // Fetch all indicators in parallel
-  const [vix, vvix, contango, fearGreed, aaii, cryptoFearGreed, canary, fbi, cycle] = await Promise.all([
+  const [vix, vvix, contango, fearGreed, aaii, cryptoFearGreed, canary, fbi, cycle, taiwanCLI] = await Promise.all([
     fetchVIX(),
     fetchVVIX(),
     fetchContango(),
@@ -1196,6 +1230,7 @@ export async function GET() {
     fetchCanaryRatio(),
     fetchFBI(),
     fetchCycleModel(),
+    fetchTaiwanCLI(),
   ])
 
   const payload: SentimentPayload = {
@@ -1208,6 +1243,7 @@ export async function GET() {
     canary,
     fbi,
     cycle,
+    taiwanCLI,
     timestamp: new Date().toISOString(),
     dataPoints: getHistoryCount(),
   }

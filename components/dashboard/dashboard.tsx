@@ -42,10 +42,20 @@ export function Dashboard() {
   )
 
   const errorCount = data
-    ? [data.vix, data.vvix, data.contango, data.fearGreed, data.aaii, data.cryptoFearGreed, data.canary, data.fbi, data.cycle].filter(
+    ? [data.vix, data.vvix, data.contango, data.fearGreed, data.aaii, data.cryptoFearGreed, data.canary, data.fbi, data.cycle, data.taiwanCLI].filter(
         (d) => d.error
       ).length
     : 0
+
+  function getSignalStyle(signal?: string): string {
+    if (!signal) return 'text-terminal-dim'
+    if (signal === '紅燈') return 'text-red-400'
+    if (signal === '黃紅燈') return 'text-orange-400'
+    if (signal === '綠燈') return 'text-terminal-green'
+    if (signal === '黃藍燈') return 'text-yellow-400'
+    if (signal === '藍燈') return 'text-blue-400'
+    return 'text-terminal-dim'
+  }
 
   if (isLoading && !data) {
     return (
@@ -340,6 +350,27 @@ export function Dashboard() {
             </>
           )}
         </div>
+
+        {/* Taiwan Business Cycle Signal Panel */}
+        <MetricPanel
+          title="台灣景氣燈號"
+          value={data?.taiwanCLI?.value ?? null}
+          change={data?.taiwanCLI?.change ?? null}
+          history={data?.taiwanCLI?.history ?? []}
+          error={data?.taiwanCLI?.error}
+          subtitle="國發會景氣對策信號（分）"
+          sparklineColor="#f97316"
+          invertColor={true}
+          lastUpdated={data?.taiwanCLI?.lastUpdated}
+          dataSource={data?.taiwanCLI?.dataSource}
+          extraInfo={
+            data?.taiwanCLI?.classification ? (
+              <p className={`text-xs font-bold ${getSignalStyle(data.taiwanCLI.classification)}`}>
+                ● {data.taiwanCLI.classification}
+              </p>
+            ) : undefined
+          }
+        />
 
         {/* FBI Stock Ranking Panel */}
         <FbiPanel data={data?.fbi} />

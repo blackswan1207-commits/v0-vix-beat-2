@@ -89,6 +89,10 @@ export interface CycleData {
   dataSource?: string
 }
 
+export interface TaiwanCLIData extends IndicatorData {
+  classification?: string  // e.g. "紅燈"
+}
+
 export interface SentimentPayload {
   vix: IndicatorData
   vvix: IndicatorData
@@ -99,6 +103,7 @@ export interface SentimentPayload {
   canary: CanaryData
   fbi: FbiData
   cycle: CycleData
+  taiwanCLI: TaiwanCLIData
   timestamp: string
   dataPoints: number  // Number of accumulated data points (max 10)
 }
