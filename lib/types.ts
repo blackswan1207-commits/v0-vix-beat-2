@@ -71,11 +71,13 @@ export interface CycleData {
   oecdCli: number | null
   oecdCliDirection: 'rising' | 'falling' | null
   oecdCliStage: CycleStage | null
+  oecdCliDate: string | null      // 資料月份 YYYY-MM（來自 Gist relay）
   // US Yield Spread (T10Y3M)
   yieldSpread: number | null
   yieldSpreadAvg: number | null
   yieldSpreadStd: number | null
   yieldSpreadStage: CycleStage | null
+  yieldSpreadDate: string | null  // 資料月份 YYYY-MM（來自 Gist relay）
   // Fed Assets
   fedAssetsChangeQoQ: number | null
   fedPolicy: FedPolicy | null

@@ -686,7 +686,11 @@ async function fetchYahooMonthlyHistory(symbol: string): Promise<MonthlyPriceRec
   if (!result) throw new Error('Invalid Yahoo Finance response')
 
   const timestamps = result.timestamp
-  const closes = result.indicators?.quote?.[0]?.close
+  const rawCloses = result.indicators?.quote?.[0]?.close
+  // 動能計算必須用含息調整價（total return）：BND 每月配息，
+  // 用不含息收盤價會低估債券報酬 ~4%/年，動能符號可能因此判錯
+  const adjCloses = result.indicators?.adjclose?.[0]?.adjclose
+  const closes = adjCloses && adjCloses.length === timestamps?.length ? adjCloses : rawCloses
 
   if (!timestamps || !closes || timestamps.length === 0) {
     throw new Error('No historical data from Yahoo Finance')
@@ -1069,16 +1073,18 @@ async function fetchCycleModel(): Promise<CycleData> {
     let oecdCli: number | null = null
     let oecdCliDirection: 'rising' | 'falling' | null = null
     let oecdCliStage: CycleStage | null = null
+    let oecdCliDate: string | null = null
     let yieldSpread: number | null = null
     let yieldSpreadAvg: number | null = null
     let yieldSpreadStd: number | null = null
     let yieldSpreadStage: CycleStage | null = null
+    let yieldSpreadDate: string | null = null
 
     if (gistRes?.ok) {
       try {
         type GistPayload = {
-          oecdCli?: { value?: number; direction?: string }
-          yieldSpread?: { current?: number; avg?: number; std?: number }
+          oecdCli?: { value?: number; direction?: string; date?: string }
+          yieldSpread?: { current?: number; avg?: number; std?: number; date?: string }
         }
         const gist = await gistRes.json() as GistPayload
         // OECD CLI
@@ -1086,6 +1092,7 @@ async function fetchCycleModel(): Promise<CycleData> {
           oecdCli = gist.oecdCli.value
           oecdCliDirection = gist.oecdCli.direction === 'falling' ? 'falling' : 'rising'
           oecdCliStage = classifyOecdCli(oecdCli, oecdCliDirection)
+          oecdCliDate = gist.oecdCli.date ?? null
         }
         // Yield Spread
         if (gist?.yieldSpread?.current != null && gist?.yieldSpread?.avg != null && gist?.yieldSpread?.std != null) {
@@ -1093,6 +1100,7 @@ async function fetchCycleModel(): Promise<CycleData> {
           yieldSpreadAvg = gist.yieldSpread.avg
           yieldSpreadStd = gist.yieldSpread.std
           yieldSpreadStage = classifyYieldSpread(yieldSpread, yieldSpreadAvg, yieldSpreadStd)
+          yieldSpreadDate = gist.yieldSpread.date ?? null
         }
       } catch { /* parse error, continue */ }
     }
@@ -1138,10 +1146,12 @@ async function fetchCycleModel(): Promise<CycleData> {
       oecdCli,
       oecdCliDirection,
       oecdCliStage,
+      oecdCliDate,
       yieldSpread,
       yieldSpreadAvg,
       yieldSpreadStd,
       yieldSpreadStage,
+      yieldSpreadDate,
       fedAssetsChangeQoQ,
       fedPolicy,
       designatedStage,
@@ -1153,8 +1163,8 @@ async function fetchCycleModel(): Promise<CycleData> {
     const msg = err instanceof Error ? err.message : 'Unknown error'
     return {
       label,
-      oecdCli: null, oecdCliDirection: null, oecdCliStage: null,
-      yieldSpread: null, yieldSpreadAvg: null, yieldSpreadStd: null, yieldSpreadStage: null,
+      oecdCli: null, oecdCliDirection: null, oecdCliStage: null, oecdCliDate: null,
+      yieldSpread: null, yieldSpreadAvg: null, yieldSpreadStd: null, yieldSpreadStage: null, yieldSpreadDate: null,
       fedAssetsChangeQoQ: null, fedPolicy: null,
       designatedStage: null, finalStage: null,
       error: `Error: 無法取得景氣循環資料 - ${msg}`,

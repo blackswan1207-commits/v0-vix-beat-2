@@ -50,7 +50,7 @@ export function CyclePanel({ data }: CyclePanelProps) {
           景氣循環模型 (富邦三指標)
         </h3>
         <div className="flex items-center gap-2">
-          <span className="text-[9px] text-terminal-dim">Quarterly</span>
+          <span className="text-[9px] text-terminal-dim">Monthly</span>
           <div className="h-1.5 w-1.5 rounded-full bg-terminal-green animate-blink-dot" aria-hidden="true" />
         </div>
       </div>
@@ -101,7 +101,9 @@ export function CyclePanel({ data }: CyclePanelProps) {
                   </span>
                 )}
               </div>
-              <div className="text-[9px] text-terminal-dim">NAFTA CLI vs 基準100</div>
+              <div className="text-[9px] text-terminal-dim">
+                G20 CLI vs 基準100{data?.oecdCliDate ? ` · ${data.oecdCliDate}` : ''}
+              </div>
               <StageBadge stage={data?.oecdCliStage ?? null} />
             </div>
 
@@ -120,7 +122,9 @@ export function CyclePanel({ data }: CyclePanelProps) {
                   10Y avg: {data.yieldSpreadAvg.toFixed(2)}%
                 </div>
               )}
-              <div className="text-[9px] text-terminal-dim">10Y − 3M</div>
+              <div className="text-[9px] text-terminal-dim">
+                10Y − 3M{data?.yieldSpreadDate ? ` · ${data.yieldSpreadDate}` : ''}
+              </div>
               <StageBadge stage={data?.yieldSpreadStage ?? null} />
             </div>
 
