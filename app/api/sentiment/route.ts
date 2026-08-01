@@ -570,88 +570,155 @@ async function fetchCryptoFearGreed(): Promise<CryptoFearGreedData> {
 }
 
 // ── AAII Investor Sentiment (Bull-Bear Spread) ──
+//
+// 資料源改為 AAII 官網原始調查表（Bullish / Neutral / Bearish 三欄），
+// Bull-Bear Spread = Bullish − Bearish，自行計算。
+//
+// 為什麼不再用 ycharts：ycharts 的 us_investor_sentiment_bull_bear_spread
+// 序列已失真，回傳 -93.02%、881.1%、-277.8% 這類不可能的數值
+// （AAII 實際區間約 ±40%），且頁面已無 .key-stat-value 元素可解析。
+//
+// AAII 表格同時提供近幾週歷史，故 sparkline 一次就有資料，不必累積。
+
+const AAII_ROW =
+  /<td[^>]*class="tableTxt"[^>]*>\s*([A-Z][a-z]{2})\s+(\d{1,2})\s*<\/td>\s*<td[^>]*>\s*([\d.]+)\s*%\s*<\/td>\s*<td[^>]*>\s*([\d.]+)\s*%\s*<\/td>\s*<td[^>]*>\s*([\d.]+)\s*%\s*<\/td>/gi
+
+const AAII_MONTHS = [
+  'jan', 'feb', 'mar', 'apr', 'may', 'jun',
+  'jul', 'aug', 'sep', 'oct', 'nov', 'dec',
+]
+
+interface AaiiWeek {
+  date: string
+  bullish: number
+  neutral: number
+  bearish: number
+  spread: number
+}
+
+const AAII_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
+
+function aaiiHeaders() {
+  return {
+    'User-Agent': AAII_UA,
+    Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+  }
+}
+
+// 表格只有 "Jul 29" 沒有年份：先假設今年，若算出來是未來日期就退一年
+function aaiiResolveDate(monthIdx: number, day: number): string {
+  const now = new Date()
+  let year = now.getUTCFullYear()
+  let d = new Date(Date.UTC(year, monthIdx, day))
+  if (d.getTime() - now.getTime() > 7 * 86400000) {
+    year -= 1
+    d = new Date(Date.UTC(year, monthIdx, day))
+  }
+  return d.toISOString().slice(0, 10)
+}
+
+function parseAaiiTable(html: string): AaiiWeek[] {
+  const weeks: AaiiWeek[] = []
+  let m: RegExpExecArray | null
+  AAII_ROW.lastIndex = 0
+  while ((m = AAII_ROW.exec(html)) !== null) {
+    const monthIdx = AAII_MONTHS.indexOf(m[1].toLowerCase())
+    if (monthIdx < 0) continue
+
+    const day = parseInt(m[2], 10)
+    const bullish = parseFloat(m[3])
+    const neutral = parseFloat(m[4])
+    const bearish = parseFloat(m[5])
+    if (![bullish, neutral, bearish].every((v) => Number.isFinite(v))) continue
+
+    // 三者相加應該接近 100%（AAII 會四捨五入，容許 ±1.5）
+    if (Math.abs(bullish + neutral + bearish - 100) > 1.5) continue
+
+    weeks.push({
+      date: aaiiResolveDate(monthIdx, day),
+      bullish,
+      neutral,
+      bearish,
+      spread: Math.round((bullish - bearish) * 10) / 10,
+    })
+  }
+  // 頁面由新到舊排列，取最近 10 週後轉成由舊到新供 sparkline 使用
+  return weeks.slice(0, 10).reverse()
+}
+
+// 備援：AAII 的分析網站，數值寫在文章敘述裡
+// 例：「The bull-bear spread narrowed to -11.1 points」
+async function fetchAaiiFallbackSpread(): Promise<number | null> {
+  const res = await fetch('https://sentiment.aaii.com/', {
+    headers: aaiiHeaders(),
+    signal: AbortSignal.timeout(12000),
+  })
+  if (!res.ok) throw new Error(`sentiment.aaii.com HTTP ${res.status}`)
+
+  const text = await res.text()
+  const m = text.match(/bull[-\s]?bear spread[^.]{0,60}?(-?\d+\.\d+)/i)
+  if (!m) return null
+
+  const value = parseFloat(m[1])
+  // AAII 的 spread 實際上不可能超過 ±100，超出就是抓錯數字
+  return Number.isFinite(value) && Math.abs(value) <= 100 ? value : null
+}
+
 async function fetchAAII(): Promise<IndicatorData> {
   const label = 'AAII Bull-Bear'
   try {
-    // Attempt to scrape from ycharts
-    // ycharts.com/indicators/us_investor_sentiment_bull_bear_spread
-    const res = await fetch(
-      'https://ycharts.com/indicators/us_investor_sentiment_bull_bear_spread',
-      {
-        headers: {
-          'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          Accept:
-            'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          'Accept-Language': 'en-US,en;q=0.5',
-        },
-        signal: AbortSignal.timeout(10000),
+    const res = await fetch('https://www.aaii.com/sentimentsurvey/sent_results', {
+      headers: aaiiHeaders(),
+      signal: AbortSignal.timeout(12000),
+    })
+    if (!res.ok) throw new Error(`aaii.com HTTP ${res.status}`)
+
+    const weeks = parseAaiiTable(await res.text())
+
+    if (weeks.length === 0) {
+      // 主來源解析失敗，改用敘述式備援（只有最新值，沒有歷史）
+      const fallback = await fetchAaiiFallbackSpread()
+      if (fallback === null) {
+        throw new Error(
+          'Could not parse the Bullish/Bearish table from aaii.com, and sentiment.aaii.com fallback returned no usable value'
+        )
       }
-    )
-
-    if (!res.ok) throw new Error(`ycharts HTTP ${res.status}`)
-
-    const html = await res.text()
-    const { load } = await import('cheerio')
-    const $ = load(html)
-
-    // ycharts typically shows the value in a key-stat element
-    let value: number | null = null
-
-    // Try various selectors that ycharts uses
-    const selectors = [
-      '.key-stat-title + .key-stat-value',
-      '.key-stat-value',
-      '[class*="current-value"]',
-      '.indicator-value',
-    ]
-
-    for (const selector of selectors) {
-      const el = $(selector).first()
-      if (el.length) {
-        const text = el.text().trim().replace('%', '').replace(',', '')
-        const parsed = parseFloat(text)
-        if (!isNaN(parsed)) {
-          value = parsed
-          break
-        }
+      const history = appendHistory(label, { date: todayStr(), value: fallback })
+      return {
+        label,
+        value: fallback,
+        change: null,
+        history,
+        lastUpdated: new Date().toISOString(),
+        dataSource: 'sentiment.aaii.com',
       }
     }
 
-    if (value === null) {
-      // Try finding any percentage-like value in the page
-      const bodyText = $('body').text()
-      const percentMatch = bodyText.match(
-        /(?:Bull[- ]Bear[^-]*?|Current\s*Value[^-]*?)(-?\d+\.?\d*)%/i
-      )
-      if (percentMatch) {
-        value = parseFloat(percentMatch[1])
-      }
+    // 把解析出來的每一週寫進 history store，之後抓取失敗時仍留得住 sparkline
+    let history = getHistory(label)
+    for (const week of weeks) {
+      history = appendHistory(label, { date: week.date, value: week.spread })
     }
 
-    if (value === null) {
-      throw new Error(
-        'Could not parse Bull-Bear Spread value from ycharts.com - page structure may have changed'
-      )
-    }
-
-    const today = todayStr()
-    const history = appendHistory(label, { date: today, value })
+    const latest = weeks[weeks.length - 1]
+    const previous = weeks.length > 1 ? weeks[weeks.length - 2] : null
 
     return {
       label,
-      value,
-      change: null,
+      value: latest.spread,
+      change:
+        previous === null
+          ? null
+          : Math.round((latest.spread - previous.spread) * 10) / 10,
       history,
       lastUpdated: new Date().toISOString(),
-      dataSource: 'ycharts.com',
+      dataSource: `AAII · ${latest.date}`,
     }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Unknown error'
-    return makeError(
-      label,
-      `Error: 無法取得真實連線，需更換資料源 - ${msg}`
-    )
+    return makeError(label, `Error: 無法取得真實連線，需更換資料源 - ${msg}`)
   }
 }
 
