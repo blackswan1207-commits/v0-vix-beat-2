@@ -1112,6 +1112,25 @@ function applyFedPolicy(stage: CycleStage, policy: FedPolicy): CycleStage {
   return stage
 }
 
+// FRED 偶發逾時或 5xx 會讓 fedPolicy 變 null，而該值被快取 2 小時，
+// 隔天 08:00 健檢撞上就報「Fed 政策為空」。單次失敗不代表資料源掛掉，重試即可濾掉。
+// 3 次 × 10s + backoff ≈ 最壞 31s，仍在 maxDuration 60s 內。
+async function fetchFredWithRetry(url: string, ua: string): Promise<Response | null> {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const res = await fetch(url, {
+        headers: { 'User-Agent': ua },
+        signal: AbortSignal.timeout(10000),
+      })
+      if (res.ok) return res
+    } catch {
+      // 逾時或網路錯誤，往下重試
+    }
+    if (attempt < 3) await new Promise((r) => setTimeout(r, 400 * attempt))
+  }
+  return null
+}
+
 async function fetchCycleModel(): Promise<CycleData> {
   const label = '景氣循環模型'
   const now = new Date()
@@ -1126,13 +1145,13 @@ async function fetchCycleModel(): Promise<CycleData> {
     // OECD API (stats.oecd.org) deprecated → 301 to sdmx.oecd.org which returns 403
     // OECD CLI fetched via Gist relay (local launchd monthly) — for now skip live fetch
     // OECD CLI + Yield Spread: GitHub Gist relay (local launchd monthly update on 12th)
-    // WALCL: 20s — FRED official API, weekly data ~3KB (fast, no aggregation needed)
+    // WALCL: FRED official API, weekly data ~3KB（fast, no aggregation needed），失敗會重試 3 次
     const RELAY_GIST_URL = 'https://gist.githubusercontent.com/blackswan1207-commits/9250d2a987aeebd6d6ec6f61a47b6f23/raw/oecd-cli.json'
     const [gistResult, walclResult] = await Promise.allSettled([
       fetch(RELAY_GIST_URL, { signal: AbortSignal.timeout(10000) }),
-      fetch(
+      fetchFredWithRetry(
         `https://api.stlouisfed.org/fred/series/observations?series_id=WALCL&observation_start=${sixMonthsAgoStr}&frequency=w&file_type=json&api_key=${FRED_API_KEY}`,
-        { headers: { 'User-Agent': FRED_UA }, signal: AbortSignal.timeout(20000) }
+        FRED_UA
       ),
     ])
     const gistRes = gistResult.status === 'fulfilled' ? gistResult.value : null
