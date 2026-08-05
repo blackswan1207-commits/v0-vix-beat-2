@@ -1112,16 +1112,17 @@ function applyFedPolicy(stage: CycleStage, policy: FedPolicy): CycleStage {
   return stage
 }
 
-// FRED 偶發逾時或 5xx 會讓 fedPolicy 變 null，而該值被快取 2 小時，
-// 隔天 08:00 健檢撞上就報「Fed 政策為空」。單次失敗不代表資料源掛掉，重試即可濾掉。
-// 3 次 × 10s + backoff ≈ 最壞 31s，仍在 maxDuration 60s 內。
-async function fetchFredWithRetry(url: string, ua: string): Promise<Response | null> {
+// FRED 與 Gist relay 都會偶發逾時或 5xx，單次失敗就讓整片欄位變 null，
+// 而結果進 2 小時快取，隔天 08:00 健檢撞上就報警（2026-08-02 Fed 政策、
+// 2026-08-05 OECD CLI 都是這樣來的）。單次失敗不代表資料源掛掉，重試即可濾掉。
+// 3 次 × 10s + backoff ≈ 最壞 31s，兩支並行，仍在 maxDuration 60s 內。
+async function fetchWithRetry(
+  url: string,
+  headers?: Record<string, string>
+): Promise<Response | null> {
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      const res = await fetch(url, {
-        headers: { 'User-Agent': ua },
-        signal: AbortSignal.timeout(10000),
-      })
+      const res = await fetch(url, { headers, signal: AbortSignal.timeout(10000) })
       if (res.ok) return res
     } catch {
       // 逾時或網路錯誤，往下重試
@@ -1148,10 +1149,10 @@ async function fetchCycleModel(): Promise<CycleData> {
     // WALCL: FRED official API, weekly data ~3KB（fast, no aggregation needed），失敗會重試 3 次
     const RELAY_GIST_URL = 'https://gist.githubusercontent.com/blackswan1207-commits/9250d2a987aeebd6d6ec6f61a47b6f23/raw/oecd-cli.json'
     const [gistResult, walclResult] = await Promise.allSettled([
-      fetch(RELAY_GIST_URL, { signal: AbortSignal.timeout(10000) }),
-      fetchFredWithRetry(
+      fetchWithRetry(RELAY_GIST_URL),
+      fetchWithRetry(
         `https://api.stlouisfed.org/fred/series/observations?series_id=WALCL&observation_start=${sixMonthsAgoStr}&frequency=w&file_type=json&api_key=${FRED_API_KEY}`,
-        FRED_UA
+        { 'User-Agent': FRED_UA }
       ),
     ])
     const gistRes = gistResult.status === 'fulfilled' ? gistResult.value : null
