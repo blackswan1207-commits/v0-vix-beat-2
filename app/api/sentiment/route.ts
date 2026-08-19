@@ -1,7 +1,7 @@
 export const maxDuration = 60
 
 import { NextResponse } from 'next/server'
-import { getCached, setCache, appendHistory, getHistory, getHistoryCount } from '@/lib/cache'
+import { getCached, setCache, appendHistory, getHistory, getHistoryCount, setLastGood, getLastGood, DEGRADED_CACHE_DURATION } from '@/lib/cache'
 import type {
   SentimentPayload,
   IndicatorData,
@@ -19,6 +19,7 @@ import type {
 import { TAIWAN_CLI_HISTORY } from '@/lib/taiwan-cli-data'
 
 const CACHE_KEY = 'sentiment-data'
+const LAST_GOOD_CYCLE = 'last-good-cycle'
 
 function todayStr(): string {
   return new Date().toISOString().slice(0, 10)
@@ -1320,6 +1321,32 @@ export async function GET() {
     fetchTaiwanCLI(),
   ])
 
+  // ── 景氣循環模型：降級偵測與墊檔（2026-08-19）──
+  // Gist relay（OECD CLI + 殖利率利差）從 Vercel 端偶發連不上，fetchWithRetry
+  // 三次全滅時，oecdCli / yieldSpread / finalStage 會整片變 null，但面板不回報
+  // error，所以看起來只是「空白」。2026-08-06、08-19 兩次早上健檢告警都是這樣來的
+  // —— 事後查 Gist 本身好好的，一連六次都是 200。
+  // 對策：沿用上一份好資料墊檔，並把這份降級 payload 的快取縮到 5 分鐘。
+  let cycleOut = cycle
+  const cycleDegraded = cycle.oecdCli == null || cycle.finalStage == null
+
+  if (!cycleDegraded) {
+    setLastGood(LAST_GOOD_CYCLE, cycle)
+  } else {
+    const lastGood = getLastGood<CycleData>(LAST_GOOD_CYCLE)
+    if (lastGood) {
+      cycleOut = {
+        ...lastGood,
+        // Fed 走 FRED、與 Gist 各自獨立，這次拿到的就用這次的
+        fedAssetsChangeQoQ: cycle.fedAssetsChangeQoQ ?? lastGood.fedAssetsChangeQoQ,
+        fedPolicy: cycle.fedPolicy ?? lastGood.fedPolicy,
+        stale: true,
+        lastUpdated: new Date().toISOString(),
+        dataSource: 'OECD / FRED（來源暫時無回應，沿用上次資料）',
+      }
+    }
+  }
+
   const payload: SentimentPayload = {
     vix,
     vvix,
@@ -1329,18 +1356,20 @@ export async function GET() {
     cryptoFearGreed,
     canary,
     fbi,
-    cycle,
+    cycle: cycleOut,
     taiwanCLI,
     timestamp: new Date().toISOString(),
     dataPoints: getHistoryCount(),
   }
 
-  // Cache the result for 2 hours
-  setCache(CACHE_KEY, payload)
+  // 正常 2 小時；降級只快取 5 分鐘，讓下一次請求就能重試上游
+  setCache(CACHE_KEY, payload, cycleDegraded ? DEGRADED_CACHE_DURATION : undefined)
 
   return NextResponse.json(payload, {
     headers: {
-      'Cache-Control': 'public, s-maxage=7200, stale-while-revalidate=3600',
+      'Cache-Control': cycleDegraded
+        ? 'public, s-maxage=60, stale-while-revalidate=60'
+        : 'public, s-maxage=7200, stale-while-revalidate=3600',
     },
   })
 }

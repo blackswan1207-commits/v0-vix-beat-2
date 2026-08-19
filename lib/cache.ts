@@ -9,24 +9,48 @@ import type { HistoricalPoint } from './types'
 interface CacheEntry<T> {
   data: T
   timestamp: number
+  ttl: number
 }
 
 const CACHE_DURATION = 2 * 60 * 60 * 1000 // 2 hours in milliseconds
+
+// 上游偶發失敗導致的「降級 payload」只快取 5 分鐘。
+// 2026-08-19 教訓：Gist relay 抓不到時整片欄位變 null，卻照樣進 2 小時快取，
+// 一次幾秒的抽風就讓全網看到壞資料最久 3 小時（CDN 再疊一層），
+// 隔天早上健檢撞上就發假警報。短 TTL 讓它自己快速痊癒。
+export const DEGRADED_CACHE_DURATION = 5 * 60 * 1000
 
 const cache = new Map<string, CacheEntry<unknown>>()
 
 export function getCached<T>(key: string): T | null {
   const entry = cache.get(key) as CacheEntry<T> | undefined
   if (!entry) return null
-  if (Date.now() - entry.timestamp > CACHE_DURATION) {
+  if (Date.now() - entry.timestamp > entry.ttl) {
     cache.delete(key)
     return null
   }
   return entry.data
 }
 
-export function setCache<T>(key: string, data: T): void {
-  cache.set(key, { data, timestamp: Date.now() })
+export function setCache<T>(key: string, data: T, ttlMs: number = CACHE_DURATION): void {
+  cache.set(key, { data, timestamp: Date.now(), ttl: ttlMs })
+}
+
+/**
+ * 最後一份「好資料」，不設過期。
+ * 用途：上游單次抓取失敗時拿來墊檔，避免面板整片空白 —— 月更資料沿用上一份
+ * 完全不影響判讀，總比顯示空白、再讓健檢半夜發假警報好。
+ * 注意：serverless 實例回收後會清空，所以它是「減災」不是「保證」，
+ * 真正讓系統自癒的是上面的 DEGRADED_CACHE_DURATION。
+ */
+const lastGoodStore = new Map<string, unknown>()
+
+export function setLastGood<T>(key: string, data: T): void {
+  lastGoodStore.set(key, data)
+}
+
+export function getLastGood<T>(key: string): T | null {
+  return (lastGoodStore.get(key) as T | undefined) ?? null
 }
 
 /**

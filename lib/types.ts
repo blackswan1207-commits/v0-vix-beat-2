@@ -84,6 +84,7 @@ export interface CycleData {
   // Combined results
   designatedStage: CycleStage | null
   finalStage: CycleStage | null
+  stale?: boolean                 // true = Gist relay 暫時抓不到，沿用上一份資料
   error?: string
   lastUpdated: string
   dataSource?: string
