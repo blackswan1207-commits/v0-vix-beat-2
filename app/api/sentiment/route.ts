@@ -15,6 +15,7 @@ import type {
   CycleStage,
   FedPolicy,
   TaiwanCLIData,
+  HistoricalPoint,
 } from '@/lib/types'
 import { TAIWAN_CLI_HISTORY } from '@/lib/taiwan-cli-data'
 

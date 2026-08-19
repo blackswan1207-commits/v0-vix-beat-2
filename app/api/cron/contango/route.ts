@@ -5,6 +5,8 @@ export const maxDuration = 30
 const CONTANGO_GIST_ID = '1a486a43e09009d5afc46ebdf15c8c95'
 const CONTANGO_GIST_FILE = 'contango_history.json'
 
+type VixContract = { price: number; expiration: number }
+
 function todayStr(): string {
   return new Date().toISOString().slice(0, 10)
 }
@@ -44,8 +46,8 @@ async function fetchContangoValue(): Promise<number | null> {
         if (typeof price !== 'number' || !expiration) return null
         return { price, expiration }
       })
-      .filter(Boolean)
-      .sort((a: { expiration: number }, b: { expiration: number }) => a.expiration - b.expiration)
+      .filter((c): c is VixContract => c !== null)
+      .sort((a, b) => a.expiration - b.expiration)
 
     if (contracts.length < 2) return null
     const f1 = contracts[0].price
