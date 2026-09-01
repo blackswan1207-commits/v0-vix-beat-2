@@ -18,6 +18,7 @@ import type {
   HistoricalPoint,
 } from '@/lib/types'
 import { TAIWAN_CLI_HISTORY } from '@/lib/taiwan-cli-data'
+import { CYCLE_FALLBACK } from '@/lib/cycle-fallback'
 
 const CACHE_KEY = 'sentiment-data'
 const LAST_GOOD_CYCLE = 'last-good-cycle'
@@ -1120,18 +1121,90 @@ function applyFedPolicy(stage: CycleStage, policy: FedPolicy): CycleStage {
 // 3 次 × 10s + backoff ≈ 最壞 31s，兩支並行，仍在 maxDuration 60s 內。
 async function fetchWithRetry(
   url: string,
-  headers?: Record<string, string>
+  headers?: Record<string, string>,
+  opts: { attempts?: number; timeoutMs?: number } = {}
 ): Promise<Response | null> {
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  const attempts = opts.attempts ?? 3
+  const timeoutMs = opts.timeoutMs ?? 10000
+  for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
-      const res = await fetch(url, { headers, signal: AbortSignal.timeout(10000) })
+      const res = await fetch(url, { headers, signal: AbortSignal.timeout(timeoutMs) })
       if (res.ok) return res
     } catch {
       // 逾時或網路錯誤，往下重試
     }
-    if (attempt < 3) await new Promise((r) => setTimeout(r, 400 * attempt))
+    if (attempt < attempts) await new Promise((r) => setTimeout(r, 400 * attempt))
   }
   return null
+}
+
+// ── Gist relay 主備雙路徑（2026-09-02）──
+// gist.githubusercontent.com 從 Vercel 端會整段連不上（2026-08-06、08-19、09-01
+// 三次告警，實測請求耗時 26~36 秒 = 3 次重試全部撞 10 秒逾時，不是 4xx）。
+// 單一主機再怎麼重試都是同一條路，改成 raw CDN 掛了就走 api.github.com 的 Gist API，
+// 兩者網路路徑完全獨立。逾時砍到 8 秒 × 2 次，兩條路徑最壞 ≈33 秒，仍在 maxDuration 60s 內。
+const RELAY_GIST_ID = '9250d2a987aeebd6d6ec6f61a47b6f23'
+const RELAY_GIST_FILE = 'oecd-cli.json'
+
+type RelayPayload = {
+  oecdCli?: { value?: number; direction?: string; date?: string }
+  yieldSpread?: { current?: number; avg?: number; std?: number; date?: string }
+}
+
+async function fetchRelayGist(): Promise<RelayPayload | null> {
+  const rawUrl = `https://gist.githubusercontent.com/blackswan1207-commits/${RELAY_GIST_ID}/raw/${RELAY_GIST_FILE}`
+  const rawRes = await fetchWithRetry(rawUrl, undefined, { attempts: 2, timeoutMs: 8000 })
+  if (rawRes) {
+    try {
+      return (await rawRes.json()) as RelayPayload
+    } catch { /* 內容壞掉，改走備援 */ }
+  }
+  const apiRes = await fetchWithRetry(
+    `https://api.github.com/gists/${RELAY_GIST_ID}`,
+    { Accept: 'application/vnd.github+json', 'User-Agent': 'vix-beat-2026' },
+    { attempts: 2, timeoutMs: 8000 }
+  )
+  if (apiRes) {
+    try {
+      const json = (await apiRes.json()) as { files?: Record<string, { content?: string }> }
+      const content = json?.files?.[RELAY_GIST_FILE]?.content
+      if (content) return JSON.parse(content) as RelayPayload
+    } catch { /* 兩條路徑都失敗，交給墊檔 */ }
+  }
+  return null
+}
+
+// 冷啟動墊檔：lastGood 存在 lambda 記憶體，當天第一個請求（正好就是 08:00 健檢那一發）
+// 一定是空的 —— 墊檔在最需要它的時候剛好不存在，等於沒有防線。
+// 這裡改用寫死在 repo 的 lib/cycle-fallback.ts，讓面板永遠不會整片空白。
+// 資料真的過期不會被蓋掉：健檢會拿 oecdCliDate / yieldSpreadDate 比對 OECD 發布日曆。
+function buildFallbackCycle(current: CycleData): CycleData {
+  const oecdCli = CYCLE_FALLBACK.oecdCli.value
+  const oecdCliDirection = CYCLE_FALLBACK.oecdCli.direction
+  const oecdCliStage = classifyOecdCli(oecdCli, oecdCliDirection)
+  const { current: yieldSpread, avg: yieldSpreadAvg, std: yieldSpreadStd } = CYCLE_FALLBACK.yieldSpread
+  const yieldSpreadStage = classifyYieldSpread(yieldSpread, yieldSpreadAvg, yieldSpreadStd)
+  // Fed 走 FRED、與 Gist 各自獨立，這次拿得到就用這次的
+  const fedPolicy = current.fedPolicy
+  const designatedStage = combineStages(oecdCliStage, yieldSpreadStage)
+  return {
+    label: '景氣循環模型',
+    oecdCli,
+    oecdCliDirection,
+    oecdCliStage,
+    oecdCliDate: CYCLE_FALLBACK.oecdCli.date,
+    yieldSpread,
+    yieldSpreadAvg,
+    yieldSpreadStd,
+    yieldSpreadStage,
+    yieldSpreadDate: CYCLE_FALLBACK.yieldSpread.date,
+    fedAssetsChangeQoQ: current.fedAssetsChangeQoQ,
+    fedPolicy,
+    designatedStage,
+    finalStage: fedPolicy ? applyFedPolicy(designatedStage, fedPolicy) : designatedStage,
+    stale: true,
+    lastUpdated: new Date().toISOString(),
+  }
 }
 
 async function fetchCycleModel(): Promise<CycleData> {
@@ -1148,16 +1221,16 @@ async function fetchCycleModel(): Promise<CycleData> {
     // OECD API (stats.oecd.org) deprecated → 301 to sdmx.oecd.org which returns 403
     // OECD CLI fetched via Gist relay (local launchd monthly) — for now skip live fetch
     // OECD CLI + Yield Spread: GitHub Gist relay (local launchd monthly update on 12th)
+    //   → fetchRelayGist 內含 raw CDN / api.github.com 主備雙路徑
     // WALCL: FRED official API, weekly data ~3KB（fast, no aggregation needed），失敗會重試 3 次
-    const RELAY_GIST_URL = 'https://gist.githubusercontent.com/blackswan1207-commits/9250d2a987aeebd6d6ec6f61a47b6f23/raw/oecd-cli.json'
     const [gistResult, walclResult] = await Promise.allSettled([
-      fetchWithRetry(RELAY_GIST_URL),
+      fetchRelayGist(),
       fetchWithRetry(
         `https://api.stlouisfed.org/fred/series/observations?series_id=WALCL&observation_start=${sixMonthsAgoStr}&frequency=w&file_type=json&api_key=${FRED_API_KEY}`,
         { 'User-Agent': FRED_UA }
       ),
     ])
-    const gistRes = gistResult.status === 'fulfilled' ? gistResult.value : null
+    const gist = gistResult.status === 'fulfilled' ? gistResult.value : null
     const walclRes = walclResult.status === 'fulfilled' ? walclResult.value : null
 
     // ── OECD CLI + Yield Spread — both from Gist relay ──
@@ -1171,29 +1244,22 @@ async function fetchCycleModel(): Promise<CycleData> {
     let yieldSpreadStage: CycleStage | null = null
     let yieldSpreadDate: string | null = null
 
-    if (gistRes?.ok) {
-      try {
-        type GistPayload = {
-          oecdCli?: { value?: number; direction?: string; date?: string }
-          yieldSpread?: { current?: number; avg?: number; std?: number; date?: string }
-        }
-        const gist = await gistRes.json() as GistPayload
-        // OECD CLI
-        if (gist?.oecdCli?.value != null && !isNaN(gist.oecdCli.value)) {
-          oecdCli = gist.oecdCli.value
-          oecdCliDirection = gist.oecdCli.direction === 'falling' ? 'falling' : 'rising'
-          oecdCliStage = classifyOecdCli(oecdCli, oecdCliDirection)
-          oecdCliDate = gist.oecdCli.date ?? null
-        }
-        // Yield Spread
-        if (gist?.yieldSpread?.current != null && gist?.yieldSpread?.avg != null && gist?.yieldSpread?.std != null) {
-          yieldSpread = gist.yieldSpread.current
-          yieldSpreadAvg = gist.yieldSpread.avg
-          yieldSpreadStd = gist.yieldSpread.std
-          yieldSpreadStage = classifyYieldSpread(yieldSpread, yieldSpreadAvg, yieldSpreadStd)
-          yieldSpreadDate = gist.yieldSpread.date ?? null
-        }
-      } catch { /* parse error, continue */ }
+    if (gist) {
+      // OECD CLI
+      if (gist.oecdCli?.value != null && !isNaN(gist.oecdCli.value)) {
+        oecdCli = gist.oecdCli.value
+        oecdCliDirection = gist.oecdCli.direction === 'falling' ? 'falling' : 'rising'
+        oecdCliStage = classifyOecdCli(oecdCli, oecdCliDirection)
+        oecdCliDate = gist.oecdCli.date ?? null
+      }
+      // Yield Spread
+      if (gist.yieldSpread?.current != null && gist.yieldSpread?.avg != null && gist.yieldSpread?.std != null) {
+        yieldSpread = gist.yieldSpread.current
+        yieldSpreadAvg = gist.yieldSpread.avg
+        yieldSpreadStd = gist.yieldSpread.std
+        yieldSpreadStage = classifyYieldSpread(yieldSpread, yieldSpreadAvg, yieldSpreadStd)
+        yieldSpreadDate = gist.yieldSpread.date ?? null
+      }
     }
 
     // ── Fed Total Assets (WALCL) ──
@@ -1334,17 +1400,19 @@ export async function GET() {
   if (!cycleDegraded) {
     setLastGood(LAST_GOOD_CYCLE, cycle)
   } else {
+    // 冷啟動時 lastGood 是空的（見 buildFallbackCycle 的說明），退到 repo 內建墊檔
     const lastGood = getLastGood<CycleData>(LAST_GOOD_CYCLE)
-    if (lastGood) {
-      cycleOut = {
-        ...lastGood,
-        // Fed 走 FRED、與 Gist 各自獨立，這次拿到的就用這次的
-        fedAssetsChangeQoQ: cycle.fedAssetsChangeQoQ ?? lastGood.fedAssetsChangeQoQ,
-        fedPolicy: cycle.fedPolicy ?? lastGood.fedPolicy,
-        stale: true,
-        lastUpdated: new Date().toISOString(),
-        dataSource: 'OECD / FRED（來源暫時無回應，沿用上次資料）',
-      }
+    const base = lastGood ?? buildFallbackCycle(cycle)
+    cycleOut = {
+      ...base,
+      // Fed 走 FRED、與 Gist 各自獨立，這次拿到的就用這次的
+      fedAssetsChangeQoQ: cycle.fedAssetsChangeQoQ ?? base.fedAssetsChangeQoQ,
+      fedPolicy: cycle.fedPolicy ?? base.fedPolicy,
+      stale: true,
+      lastUpdated: new Date().toISOString(),
+      dataSource: lastGood
+        ? 'OECD / FRED（來源暫時無回應，沿用上次資料）'
+        : 'OECD / FRED（來源暫時無回應，使用內建墊檔）',
     }
   }
 
@@ -1363,7 +1431,10 @@ export async function GET() {
     dataPoints: getHistoryCount(),
   }
 
-  // 正常 2 小時；降級只快取 5 分鐘，讓下一次請求就能重試上游
+  // 正常 2 小時；降級只快取 30 秒，讓下一次請求就能重試上游。
+  // 2026-09-01 教訓：舊值 5 分鐘 > 健檢的 90 秒複查間隔，而 ?_hc= 只繞得過 CDN、
+  // 繞不過 lambda 記憶體裡這份快取 —— 複查必然讀到同一份壞資料，這類問題的
+  // 複查機制形同虛設。健檢那邊同步把複查間隔拉長到 6 分鐘。
   setCache(CACHE_KEY, payload, cycleDegraded ? DEGRADED_CACHE_DURATION : undefined)
 
   return NextResponse.json(payload, {

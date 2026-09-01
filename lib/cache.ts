@@ -14,11 +14,14 @@ interface CacheEntry<T> {
 
 const CACHE_DURATION = 2 * 60 * 60 * 1000 // 2 hours in milliseconds
 
-// 上游偶發失敗導致的「降級 payload」只快取 5 分鐘。
+// 上游偶發失敗導致的「降級 payload」只快取 30 秒。
 // 2026-08-19 教訓：Gist relay 抓不到時整片欄位變 null，卻照樣進 2 小時快取，
 // 一次幾秒的抽風就讓全網看到壞資料最久 3 小時（CDN 再疊一層），
 // 隔天早上健檢撞上就發假警報。短 TTL 讓它自己快速痊癒。
-export const DEGRADED_CACHE_DURATION = 5 * 60 * 1000
+// 2026-09-01 追加：原本 5 分鐘還是太長 —— 健檢 90 秒後的複查一定落在這個窗口內，
+// 而複查的 ?_hc= 只繞得過 CDN、繞不過這份記憶體快取，等於複查永遠救不了降級。
+// 砍到 30 秒（仍足以擋住瞬間並發打爆上游），複查才有機會拿到重抓的結果。
+export const DEGRADED_CACHE_DURATION = 30 * 1000
 
 const cache = new Map<string, CacheEntry<unknown>>()
 
