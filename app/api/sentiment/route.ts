@@ -1144,19 +1144,27 @@ async function fetchWithRetry(
 // 單一主機再怎麼重試都是同一條路，改成 raw CDN 掛了就走 api.github.com 的 Gist API，
 // 兩者網路路徑完全獨立。逾時砍到 8 秒 × 2 次，兩條路徑最壞 ≈33 秒，仍在 maxDuration 60s 內。
 const RELAY_GIST_ID = '9250d2a987aeebd6d6ec6f61a47b6f23'
-const RELAY_GIST_FILE = 'oecd-cli.json'
+const RELAY_FILE_CYCLE = 'oecd-cli.json'
+const RELAY_FILE_TAIWAN = 'taiwan-cli.json'
 
 type RelayPayload = {
   oecdCli?: { value?: number; direction?: string; date?: string }
   yieldSpread?: { current?: number; avg?: number; std?: number; date?: string }
 }
 
-async function fetchRelayGist(): Promise<RelayPayload | null> {
-  const rawUrl = `https://gist.githubusercontent.com/blackswan1207-commits/${RELAY_GIST_ID}/raw/${RELAY_GIST_FILE}`
+type TaiwanRelayPayload = {
+  history?: Array<{ date?: string; score?: number; signal?: string }>
+  latest?: { date?: string; score?: number; signal?: string }
+  publishedAt?: string
+}
+
+// 同一個 Gist 放多個 relay 檔（oecd-cli.json / taiwan-cli.json），共用這條主備路徑
+async function fetchRelayFile<T>(filename: string): Promise<T | null> {
+  const rawUrl = `https://gist.githubusercontent.com/blackswan1207-commits/${RELAY_GIST_ID}/raw/${filename}`
   const rawRes = await fetchWithRetry(rawUrl, undefined, { attempts: 2, timeoutMs: 8000 })
   if (rawRes) {
     try {
-      return (await rawRes.json()) as RelayPayload
+      return (await rawRes.json()) as T
     } catch { /* 內容壞掉，改走備援 */ }
   }
   const apiRes = await fetchWithRetry(
@@ -1167,12 +1175,14 @@ async function fetchRelayGist(): Promise<RelayPayload | null> {
   if (apiRes) {
     try {
       const json = (await apiRes.json()) as { files?: Record<string, { content?: string }> }
-      const content = json?.files?.[RELAY_GIST_FILE]?.content
-      if (content) return JSON.parse(content) as RelayPayload
+      const content = json?.files?.[filename]?.content
+      if (content) return JSON.parse(content) as T
     } catch { /* 兩條路徑都失敗，交給墊檔 */ }
   }
   return null
 }
+
+const fetchRelayGist = () => fetchRelayFile<RelayPayload>(RELAY_FILE_CYCLE)
 
 // 冷啟動墊檔：lastGood 存在 lambda 記憶體，當天第一個請求（正好就是 08:00 健檢那一發）
 // 一定是空的 —— 墊檔在最需要它的時候剛好不存在，等於沒有防線。
@@ -1335,7 +1345,19 @@ async function fetchCycleModel(): Promise<CycleData> {
 async function fetchTaiwanCLI(): Promise<TaiwanCLIData> {
   const label = '台灣景氣燈號'
   try {
-    const sorted = [...TAIWAN_CLI_HISTORY].sort((a, b) => a.date.localeCompare(b.date))
+    // 2026-09-06 起改吃 Gist relay（本機 fetch-ndc-cli.py 每日更新）。
+    // 國發會官網擋一般 HTTP 客戶端的 TLS 指紋，Vercel 直接抓不到，所以走中繼。
+    // 抓不到就退回 lib/taiwan-cli-data.ts 的靜態墊檔，面板不會空白；
+    // 墊檔真的過期由健檢的 TAIWAN_MAX_DAYS 抓出來。
+    const relay = await fetchRelayFile<TaiwanRelayPayload>(RELAY_FILE_TAIWAN)
+    const relayRows = (relay?.history ?? []).filter(
+      (d): d is { date: string; score: number; signal: string } =>
+        typeof d?.date === 'string' && typeof d?.score === 'number' && typeof d?.signal === 'string'
+    )
+    const fromRelay = relayRows.length > 0
+    const rows = fromRelay ? relayRows : TAIWAN_CLI_HISTORY
+
+    const sorted = [...rows].sort((a, b) => a.date.localeCompare(b.date))
     const latest = sorted[sorted.length - 1]
     const prev = sorted[sorted.length - 2]
     const history = sorted.map(d => ({ date: d.date, value: d.score }))
@@ -1347,7 +1369,9 @@ async function fetchTaiwanCLI(): Promise<TaiwanCLIData> {
       classification: latest.signal,
       history,
       lastUpdated: new Date().toISOString(),
-      dataSource: `國發會 · ${latest.date}`,
+      dataSource: fromRelay
+        ? `國發會 · ${latest.date}`
+        : `國發會 · ${latest.date}（relay 無回應，使用內建墊檔）`,
     }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Unknown error'
